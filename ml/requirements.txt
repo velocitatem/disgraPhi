@@ -5,3 +5,17 @@ flask
 tqdm
 uvicorn
 torch
+opencv-python
+pillow
+qrcode[pil]
+reportlab
+numpy
+torchvision
+pyzbar
+beautifulsoup4
+lxml
+peft
+transformers
+accelerate
+urllib3
+huggingface_hub
