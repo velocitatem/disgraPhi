@@ -394,7 +394,6 @@ class PacketProcessor:
                 continue
 
             payload.setdefault('raw', raw_data)
-            payloads.append(payload)
 
             corner_id = payload.get('corner')
             if corner_id in ['TL', 'TR', 'BL', 'BR']:
@@ -403,22 +402,37 @@ class PacketProcessor:
                 corners[corner_id] = center
 
             page_data = payload.get('page')
+            page_id: Optional[str] = None
+
             if isinstance(page_data, dict):
                 page_id = page_data.get('id')
-                if page_id:
-                    page_votes[page_id] += 1
+                if not page_id:
+                    # Support older payloads with flattened id field
+                    page_id = page_data.get('page')
+            elif isinstance(page_data, str):
+                page_id = page_data
+
+            if page_id:
+                payload['page_id'] = page_id
+                page_votes[page_id] += 1
+
+            payloads.append(payload)
 
         if page_votes:
             best_page_id, _ = page_votes.most_common(1)[0]
             for payload in payloads:
-                page_data = payload.get('page')
-                if isinstance(page_data, dict) and page_data.get('id') == best_page_id:
-                    page_context = {
-                        'id': page_data.get('id'),
-                        'number': page_data.get('number'),
-                        'total': page_data.get('total'),
-                        'entries': page_data.get('entries'),
-                    }
+                if payload.get('page_id') == best_page_id:
+                    page_data = payload.get('page')
+                    context: Dict[str, Any] = {'id': best_page_id}
+                    if isinstance(page_data, dict):
+                        context.update(
+                            {
+                                'number': page_data.get('number'),
+                                'total': page_data.get('total'),
+                                'entries': page_data.get('entries'),
+                            }
+                        )
+                    page_context = context
                     break
 
         aligned = None

@@ -63,14 +63,14 @@ class DisgraPhiTrainer:
         train_dataset,
         val_dataset,
         output_dir: str,
-        learning_rate: float = 2e-4,
+        learning_rate: float = 1e-5,
         batch_size: int = 2,
         gradient_accumulation_steps: int = 4,
-        num_epochs: int = 1,
-        warmup_steps: int = 100,
+        num_epochs: int = 3,
+        warmup_steps: int = 0,  # 0 means auto-calculate as 30% of total steps
         log_every: int = 10,
         save_every: int = 500,
-        eval_every: int = 250,
+        eval_every: int = 100,
         max_grad_norm: float = 1.0
     ):
         self.model = model
@@ -114,14 +114,16 @@ class DisgraPhiTrainer:
             model.model.parameters(),
             lr=learning_rate,
             betas=(0.9, 0.999),
-            weight_decay=0.01
+            weight_decay=0.05  # Increased from 0.01 for better regularization
         )
 
         # Setup lr scheduler
         num_training_steps = len(self.train_loader) * num_epochs // gradient_accumulation_steps
+        # Use 30% of training steps for warmup if warmup_steps not explicitly set
+        effective_warmup_steps = warmup_steps if warmup_steps > 0 else int(0.3 * num_training_steps)
         self.scheduler = get_linear_schedule_with_warmup(
             self.optimizer,
-            num_warmup_steps=warmup_steps,
+            num_warmup_steps=effective_warmup_steps,
             num_training_steps=num_training_steps
         )
 
@@ -257,8 +259,27 @@ class DisgraPhiTrainer:
                     if hasattr(image, 'convert'):
                         image = image.convert('RGB')
 
+                    # Create chat template with generation prompt
+                    messages = [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "image"},
+                                {"type": "text", "text": "Transcribe this handwritten text."}
+                            ]
+                        }
+                    ]
+
+                    # Apply chat template with generation prompt
+                    text_prompt = self.model.processor.apply_chat_template(
+                        messages,
+                        tokenize=False,
+                        add_generation_prompt=True
+                    )
+
+                    # Process input
                     inputs = self.model.processor(
-                        text=["Transcribe this handwritten text."],
+                        text=[text_prompt],
                         images=[image],
                         return_tensors="pt",
                         padding=True
@@ -271,19 +292,15 @@ class DisgraPhiTrainer:
                     output_ids = self.model.model.generate(
                         **inputs,
                         max_new_tokens=128,
-                        temperature=0.1,
                         do_sample=False
                     )
 
-                    # Decode
+                    # Decode only the generated tokens (skip input)
+                    generated_ids = output_ids[:, inputs['input_ids'].shape[1]:]
                     prediction = self.model.processor.batch_decode(
-                        output_ids,
+                        generated_ids,
                         skip_special_tokens=True
-                    )[0]
-
-                    # Clean up prediction (remove prompt)
-                    if "Transcribe" in prediction:
-                        prediction = prediction.split("Transcribe this handwritten text.")[-1].strip()
+                    )[0].strip()
 
                     samples.append({
                         'ground_truth': ground_truth,
@@ -622,7 +639,7 @@ def main():
     parser.add_argument(
         '--learning-rate',
         type=float,
-        default=2e-4,
+        default=1e-5,
         help='Learning rate'
     )
     parser.add_argument(
@@ -640,19 +657,19 @@ def main():
     parser.add_argument(
         '--num-epochs',
         type=int,
-        default=1,
+        default=3,
         help='Number of training epochs'
     )
     parser.add_argument(
         '--warmup-steps',
         type=int,
-        default=100,
-        help='Number of warmup steps'
+        default=0,
+        help='Number of warmup steps (0 = auto: 30%% of total steps)'
     )
     parser.add_argument(
         '--eval-every',
         type=int,
-        default=250,
+        default=100,
         help='Evaluate every N steps'
     )
     parser.add_argument(

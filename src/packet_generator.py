@@ -148,7 +148,7 @@ class PacketGenerator:
             }
             self.page_manifest.append(page_meta)
 
-            qr_payload = self._build_qr_payload(page_meta, task_type)
+            qr_payload = self._build_qr_payload(page_meta)
             self._add_qr_corners(c, qr_payload)
 
             y_position = self._initial_y_position(page_index)
@@ -305,19 +305,11 @@ class PacketGenerator:
 
     def _build_qr_payload(
         self,
-        page_meta: Dict[str, Any],
-        task_type: str
+        page_meta: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Assemble the shared payload embedded in each corner QR."""
         return {
-            "user": self.user_id,
-            "task": task_type,
-            "page": {
-                "id": page_meta["page_id"],
-                "number": page_meta["page_number"],
-                "total": page_meta["total_pages"],
-                "entries": page_meta["entry_ids"],
-            },
+            "page": page_meta["page_id"],
         }
 
     def _estimate_entry_height(
