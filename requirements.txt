@@ -26,3 +26,5 @@ accelerate
 urllib3
 huggingface_hub
 pyyaml
+bitsandbytes
+jiwer

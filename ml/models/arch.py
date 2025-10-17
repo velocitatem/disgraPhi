@@ -16,7 +16,7 @@ import torch.nn as nn
 from typing import Optional, Dict, List, Tuple
 from pathlib import Path
 from transformers import (
-    AutoModelForCausalLM,
+    Qwen2VLForConditionalGeneration,
     AutoTokenizer,
     AutoProcessor,
     BitsAndBytesConfig
@@ -90,7 +90,7 @@ class QwenVLHandwritingModel(nn.Module):
 
         # Load base model
         print(f"Loading base model {model_name}...")
-        self.base_model = AutoModelForCausalLM.from_pretrained(
+        self.base_model = Qwen2VLForConditionalGeneration.from_pretrained(
             model_name,
             device_map=device_map,
             trust_remote_code=True,
@@ -121,7 +121,7 @@ class QwenVLHandwritingModel(nn.Module):
             ],
             lora_dropout=lora_dropout,
             bias="none",
-            task_type="CAUSAL_LM"
+            task_type="CAUSAL_LM"  # Qwen2-VL uses causal language modeling for text generation
         )
 
         # Apply LoRA
@@ -145,7 +145,8 @@ class QwenVLHandwritingModel(nn.Module):
         pixel_values: torch.Tensor,
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        labels: Optional[torch.Tensor] = None
+        labels: Optional[torch.Tensor] = None,
+        image_grid_thw: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
         """
         Forward pass through the model.
@@ -155,12 +156,14 @@ class QwenVLHandwritingModel(nn.Module):
             input_ids: Token IDs [batch, seq_len]
             attention_mask: Attention mask [batch, seq_len]
             labels: Target token IDs for training [batch, seq_len]
+            image_grid_thw: Image grid dimensions (temporal, height, width) for Qwen2-VL
 
         Returns:
             Dictionary with loss, logits, etc.
         """
         outputs = self.model(
             pixel_values=pixel_values,
+            image_grid_thw=image_grid_thw,
             input_ids=input_ids,
             attention_mask=attention_mask,
             labels=labels

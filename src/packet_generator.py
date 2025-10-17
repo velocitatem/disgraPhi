@@ -9,10 +9,12 @@ Generates PDF practice packets with:
 """
 
 import io
+import json
+import hashlib
 import yaml
 import qrcode
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from reportlab.lib.pagesizes import letter, A4
 from reportlab.lib.units import inch
 from reportlab.pdfgen import canvas
@@ -38,6 +40,7 @@ class PacketGenerator:
         self.user_id = user_id
         self.page_size = page_size
         self.config = self._load_config(config_path)
+        self.page_manifest: List[Dict[str, Any]] = []
 
         # Page dimensions
         self.width, self.height = page_size
@@ -100,43 +103,70 @@ class PacketGenerator:
         items_per_packet = self.config.get('packet_config', {}).get('items_per_packet', 5)
         entries = entries[:items_per_packet]
 
+        normalized_entries = [
+            {
+                'id': entry['id'],
+                'prompt': entry['prompt'],
+                'text': entry['text'].strip()
+            }
+            for entry in entries
+        ]
+
         # Create PDF canvas
         c = canvas.Canvas(output_path, pagesize=self.page_size)
 
-        # Generate content
+        # Pre-compute pagination so we can embed accurate page metadata per QR
+        pages = self._paginate_entries(c, normalized_entries)
+        if not pages:
+            raise ValueError("No entries available to generate packet pages.")
+
+        total_pages = len(pages)
+        self.page_manifest = []
+
         ground_truth = {}
+        entry_counter = 1
 
-        # Add header to first page
-        self._add_header(c, task_type)
-
-        # Add QR codes for alignment
-        self._add_qr_corners(c)
-
-        # Add entries
-        y_position = self.height - self.margin_top - self.qr_size - 0.8 * inch
-        page_num = 1
-
-        for idx, entry in enumerate(entries):
-            entry_id = entry['id']
-            prompt = entry['prompt']
-            text = entry['text'].strip()
-
-            # Calculate required height for this entry
-            required_height = self._estimate_entry_height(c, prompt, text)
-
-            # Check if we need a new page
-            if y_position - required_height < self.margin_bottom + self.qr_size:
+        for page_index, page in enumerate(pages, start=1):
+            if page_index > 1:
                 c.showPage()
-                page_num += 1
-                self._add_qr_corners(c)
-                y_position = self.height - self.margin_top - self.qr_size - 0.3 * inch
 
-            # Add entry
-            y_position = self._add_entry(c, y_position, prompt, text, idx + 1)
-            ground_truth[entry_id] = text
+            if page_index == 1:
+                self._add_header(c, task_type)
 
-            # Add spacing between entries
-            y_position -= self.entry_spacing
+            page_entry_ids = [item['entry']['id'] for item in page['entries']]
+            page_id = self._compute_page_signature(
+                entry_ids=page_entry_ids,
+                page_number=page_index,
+                task_type=task_type
+            )
+
+            page_meta = {
+                "page_number": page_index,
+                "total_pages": total_pages,
+                "entry_ids": page_entry_ids,
+                "page_id": page_id,
+            }
+            self.page_manifest.append(page_meta)
+
+            qr_payload = self._build_qr_payload(page_meta, task_type)
+            self._add_qr_corners(c, qr_payload)
+
+            y_position = self._initial_y_position(page_index)
+
+            for page_entry in page['entries']:
+                entry = page_entry['entry']
+                y_position = self._add_entry(
+                    c,
+                    y_position,
+                    entry['prompt'],
+                    entry['text'],
+                    entry_counter
+                )
+                ground_truth[entry['id']] = entry['text']
+                entry_counter += 1
+
+                # Maintain spacing consistency for subsequent entries on the page
+                y_position -= self.entry_spacing
 
         # Add instructions page at the end
         c.showPage()
@@ -177,8 +207,8 @@ class PacketGenerator:
             f"Task: {task_desc}"
         )
 
-    def _add_qr_corners(self, c: canvas.Canvas) -> None:
-        """Add QR codes at the four corners for alignment."""
+    def _add_qr_corners(self, c: canvas.Canvas, payload: Dict[str, Any]) -> None:
+        """Add QR codes at the four corners embedding page identification metadata."""
         corner_positions = {
             'TL': (self.margin_left, self.height - self.margin_top - self.qr_size),
             'TR': (self.width - self.margin_right - self.qr_size,
@@ -195,7 +225,9 @@ class PacketGenerator:
                 box_size=10,
                 border=1,
             )
-            qr.add_data(corner_id)
+            qr_data = payload.copy()
+            qr_data['corner'] = corner_id
+            qr.add_data(json.dumps(qr_data, separators=(',', ':'), sort_keys=True))
             qr.make(fit=True)
 
             img = qr.make_image(fill_color="black", back_color="white")
@@ -212,6 +244,81 @@ class PacketGenerator:
                 width=self.qr_size,
                 height=self.qr_size
             )
+
+    def _initial_y_position(self, page_number: int) -> float:
+        """Compute the starting Y position for entries on a given page."""
+        extra_offset = 0.8 * inch if page_number == 1 else 0.3 * inch
+        return self.height - self.margin_top - self.qr_size - extra_offset
+
+    def _paginate_entries(
+        self,
+        c: canvas.Canvas,
+        entries: List[Dict[str, str]]
+    ) -> List[Dict[str, Any]]:
+        """Group entries into pages while respecting layout constraints."""
+        pages: List[Dict[str, Any]] = []
+        current_page_entries: List[Dict[str, Any]] = []
+        page_number = 1
+        y_position = self._initial_y_position(page_number)
+
+        for idx, entry in enumerate(entries):
+            required_height = self._estimate_entry_height(c, entry['prompt'], entry['text'])
+
+            if current_page_entries and y_position - required_height < self.margin_bottom + self.qr_size:
+                pages.append(
+                    {
+                        "page_number": page_number,
+                        "entries": current_page_entries,
+                    }
+                )
+                current_page_entries = []
+                page_number += 1
+                y_position = self._initial_y_position(page_number)
+
+            current_page_entries.append(
+                {
+                    "entry": entry,
+                    "global_index": idx,
+                }
+            )
+            y_position -= required_height + self.entry_spacing
+
+        if current_page_entries:
+            pages.append(
+                {
+                    "page_number": page_number,
+                    "entries": current_page_entries,
+                }
+            )
+
+        return pages
+
+    def _compute_page_signature(
+        self,
+        entry_ids: List[str],
+        page_number: int,
+        task_type: str
+    ) -> str:
+        """Create a compact identifier tying a page to its ground-truth entries."""
+        signature_input = f"{self.user_id}|{task_type}|{page_number}|" + '|'.join(entry_ids)
+        return hashlib.sha1(signature_input.encode('utf-8')).hexdigest()[:12]
+
+    def _build_qr_payload(
+        self,
+        page_meta: Dict[str, Any],
+        task_type: str
+    ) -> Dict[str, Any]:
+        """Assemble the shared payload embedded in each corner QR."""
+        return {
+            "user": self.user_id,
+            "task": task_type,
+            "page": {
+                "id": page_meta["page_id"],
+                "number": page_meta["page_number"],
+                "total": page_meta["total_pages"],
+                "entries": page_meta["entry_ids"],
+            },
+        }
 
     def _estimate_entry_height(
         self,

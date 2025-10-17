@@ -9,8 +9,9 @@ Components:
 import os
 import json
 import shutil
+from collections import Counter
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from huggingface_hub import hf_hub_download, login
 from tqdm import tqdm
 import cv2
@@ -279,12 +280,13 @@ class PacketProcessor:
 
         self.lines_dir = self.user_dir / 'lines'
         self.lines_dir.mkdir(exist_ok=True)
+        self.page_history: List[Dict[str, Any]] = []
 
     def process_packet(
         self,
         image_paths: List[str],
         ground_truth: Dict[str, str]
-    ) -> Dict[str, any]:
+    ) -> Dict[str, Any]:
         """
         Process photographed packet pages.
 
@@ -296,6 +298,7 @@ class PacketProcessor:
             Processing results with detected line count and quality metrics
         """
         all_lines = []
+        self.page_history = []
 
         for img_path in tqdm(image_paths, desc="Processing packet pages"):
             img = cv2.imread(img_path)
@@ -304,11 +307,43 @@ class PacketProcessor:
                 continue
 
             # Detect QR codes and de-skew
-            aligned_img = self._detect_and_align(img)
-            if aligned_img is None:
-                print(f"Warning: Could not align {img_path}")
-                # Fall back to original image
+            alignment = self._detect_and_align(img)
+
+            if alignment is None:
+                print(f"Warning: Could not align {img_path} (no QR codes detected)")
                 aligned_img = img
+                page_context = None
+                page_votes: Dict[str, int] = {}
+            else:
+                aligned_img = alignment.get('image')
+                page_context = alignment.get('page')
+                page_votes = alignment.get('votes', {})
+
+                if aligned_img is None:
+                    print(
+                        f"Warning: Could not align {img_path} (insufficient corner detections)"
+                    )
+                    aligned_img = img
+
+            self.page_history.append(
+                {
+                    "image": str(img_path),
+                    "page": page_context,
+                    "votes": page_votes,
+                }
+            )
+
+            if page_context:
+                page_id = page_context.get('id')
+                page_num = page_context.get('number')
+                page_total = page_context.get('total')
+                if page_num is not None and page_total is not None:
+                    page_label = f"{page_num}/{page_total}"
+                else:
+                    page_label = page_num if page_num is not None else page_id
+                print(
+                    f"Detected packet page {page_label} (id {page_id}) for {img_path}"
+                )
 
             # Segment lines
             line_imgs = self._segment_lines(aligned_img)
@@ -333,70 +368,111 @@ class PacketProcessor:
         return {
             'lines_detected': len(saved_lines),
             'lines_matched': len(matched_gt),
-            'output_dir': str(self.user_dir)
+            'output_dir': str(self.user_dir),
+            'page_history': self.page_history,
         }
 
-    def _detect_and_align(self, img: np.ndarray) -> Optional[np.ndarray]:
+    def _detect_and_align(self, img: np.ndarray) -> Optional[Dict[str, Any]]:
         """
-        Detect QR codes at corners and apply perspective transform.
+        Detect QR codes at corners, align the page, and recover embedded metadata.
 
-        Expected QR layout:
-        TL -------- TR
-        |           |
-        |           |
-        BL -------- BR
+        Returns a dictionary with the aligned image (if possible), page metadata,
+        and voting statistics derived from the detected QR payloads. Returns None
+        when no QR payloads can be interpreted.
         """
-        # Detect all QR codes
         qr_codes = pyzbar.decode(img)
 
-        if len(qr_codes) < 4:
-            # Not enough QR codes for alignment
-            return None
+        corners: Dict[str, tuple[int, int]] = {}
+        payloads: List[Dict[str, Any]] = []
+        page_votes: Counter[str] = Counter()
+        page_context: Optional[Dict[str, Any]] = None
 
-        # Parse QR codes to identify corners
-        corners = {}
         for qr in qr_codes:
-            data = qr.data.decode('utf-8')
-            # Expected format: "TL", "TR", "BL", "BR"
-            if data in ['TL', 'TR', 'BL', 'BR']:
-                # Get center of QR code
+            raw_data = qr.data.decode('utf-8')
+            payload = self._parse_qr_payload(raw_data)
+            if payload is None:
+                continue
+
+            payload.setdefault('raw', raw_data)
+            payloads.append(payload)
+
+            corner_id = payload.get('corner')
+            if corner_id in ['TL', 'TR', 'BL', 'BR']:
                 rect = qr.rect
                 center = (rect.left + rect.width // 2, rect.top + rect.height // 2)
-                corners[data] = center
+                corners[corner_id] = center
 
-        if len(corners) != 4:
+            page_data = payload.get('page')
+            if isinstance(page_data, dict):
+                page_id = page_data.get('id')
+                if page_id:
+                    page_votes[page_id] += 1
+
+        if page_votes:
+            best_page_id, _ = page_votes.most_common(1)[0]
+            for payload in payloads:
+                page_data = payload.get('page')
+                if isinstance(page_data, dict) and page_data.get('id') == best_page_id:
+                    page_context = {
+                        'id': page_data.get('id'),
+                        'number': page_data.get('number'),
+                        'total': page_data.get('total'),
+                        'entries': page_data.get('entries'),
+                    }
+                    break
+
+        aligned = None
+        if len(corners) == 4:
+            src_pts = np.float32([
+                corners['TL'],
+                corners['TR'],
+                corners['BR'],
+                corners['BL']
+            ])
+
+            width = max(
+                np.linalg.norm(np.array(corners['TR']) - np.array(corners['TL'])),
+                np.linalg.norm(np.array(corners['BR']) - np.array(corners['BL']))
+            )
+            height = max(
+                np.linalg.norm(np.array(corners['BL']) - np.array(corners['TL'])),
+                np.linalg.norm(np.array(corners['BR']) - np.array(corners['TR']))
+            )
+
+            dst_pts = np.float32([
+                [0, 0],
+                [width, 0],
+                [width, height],
+                [0, height]
+            ])
+
+            matrix = cv2.getPerspectiveTransform(src_pts, dst_pts)
+            aligned = cv2.warpPerspective(img, matrix, (int(width), int(height)))
+
+        if not payloads:
             return None
 
-        # Define source and destination points
-        src_pts = np.float32([
-            corners['TL'],
-            corners['TR'],
-            corners['BR'],
-            corners['BL']
-        ])
+        return {
+            'image': aligned,
+            'page': page_context,
+            'votes': dict(page_votes),
+            'corners': list(corners.keys()),
+            'payloads': payloads,
+        }
 
-        # Calculate destination dimensions
-        width = max(
-            np.linalg.norm(np.array(corners['TR']) - np.array(corners['TL'])),
-            np.linalg.norm(np.array(corners['BR']) - np.array(corners['BL']))
-        )
-        height = max(
-            np.linalg.norm(np.array(corners['BL']) - np.array(corners['TL'])),
-            np.linalg.norm(np.array(corners['BR']) - np.array(corners['TR']))
-        )
+    def _parse_qr_payload(self, data: str) -> Optional[Dict[str, Any]]:
+        """Parse a QR payload supporting both legacy corner labels and JSON blobs."""
+        try:
+            parsed = json.loads(data)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
 
-        dst_pts = np.float32([
-            [0, 0],
-            [width, 0],
-            [width, height],
-            [0, height]
-        ])
+        if data in ['TL', 'TR', 'BL', 'BR']:
+            return {'corner': data}
 
-        # Compute perspective transform
-        matrix = cv2.getPerspectiveTransform(src_pts, dst_pts)
-        aligned = cv2.warpPerspective(img, matrix, (int(width), int(height)))
-
-        return aligned
+        return None
 
     def _segment_lines(self, img: np.ndarray) -> List[np.ndarray]:
         """
