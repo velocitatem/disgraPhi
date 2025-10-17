@@ -1,0 +1,104 @@
+# DisgraPhi Training Content Configuration
+# Defines text content for personalization packets
+
+# Journal entries for handwriting personalization
+# Each entry should be 3-5 sentences to provide sufficient training data
+journal_entries:
+  - id: journal_001
+    prompt: "Morning Reflection"
+    text: |
+      Today I woke up feeling grateful for the small things in life. The sun was
+      shining through my window, and I could hear birds singing outside. I've been
+      thinking a lot about how important it is to slow down and appreciate these
+      moments. Sometimes we get so caught up in our routines that we forget to notice
+      the beauty around us.
+
+  - id: journal_002
+    prompt: "Afternoon Thoughts"
+    text: |
+      I had an interesting conversation with a friend today about childhood memories.
+      We talked about how the places we grew up in shaped who we became. It's funny
+      how certain smells or sounds can instantly transport you back to a specific
+      moment in time. I realized that our past experiences are always with us,
+      influencing our decisions in ways we don't always recognize.
+
+  - id: journal_003
+    prompt: "Evening Notes"
+    text: |
+      Tonight I tried cooking a new recipe for dinner. It didn't turn out exactly
+      as planned, but that's okay. I'm learning that perfection isn't the goal,
+      progress is. Each attempt teaches me something new about patience and creativity.
+      The kitchen has become a place where I can experiment and make mistakes without
+      judgment. It's liberating to accept imperfection.
+
+  - id: journal_004
+    prompt: "Weekend Plans"
+    text: |
+      I'm looking forward to spending this weekend outdoors. There's a hiking trail
+      nearby that I've been wanting to explore for months. Being in nature helps me
+      clear my mind and reset my thoughts. I always feel more centered after spending
+      time away from screens and city noise. Maybe I'll bring my camera and try to
+      capture some of the scenery.
+
+  - id: journal_005
+    prompt: "Late Night Musings"
+    text: |
+      Before bed, I've been reading a book about philosophy and the human experience.
+      One passage really stuck with me about how we create meaning through our actions
+      and relationships. It made me think about the connections I have with people in
+      my life and how those bonds shape my sense of purpose. Tomorrow I want to reach
+      out to someone I haven't talked to in a while.
+
+# Alternative content types for future expansion
+story_prompts:
+  - id: story_001
+    prompt: "Creative Writing"
+    text: |
+      The old bookstore at the corner of Fifth and Main had been there for as long
+      as anyone could remember. Its wooden shelves were packed with stories from
+      every era and every corner of the world. Sarah had passed by it countless times
+      but never stepped inside until one rainy afternoon when she needed shelter from
+      the storm.
+
+  - id: story_002
+    prompt: "Short Fiction"
+    text: |
+      Marcus found the letter tucked inside an old record sleeve at the thrift store.
+      The handwriting was elegant but hurried, as if the writer had been racing against
+      time. It was addressed to someone named Claire, and it spoke of a promise that
+      had never been kept. He wondered what had happened to these two people and whether
+      their story had ended happily or in heartbreak.
+
+letter_templates:
+  - id: letter_001
+    prompt: "Friendly Letter"
+    text: |
+      Dear friend, I hope this letter finds you well and in good spirits. I wanted
+      to write and tell you how much our last conversation meant to me. Your words of
+      encouragement came at exactly the right time, and I've been thinking about them
+      ever since. Life has a way of bringing the right people into our lives when we
+      need them most. Thank you for being one of those people for me.
+
+  - id: letter_002
+    prompt: "Thank You Note"
+    text: |
+      I wanted to express my sincere gratitude for your kindness and generosity.
+      Your thoughtfulness made a difficult situation so much easier to handle.
+      It's rare to meet someone who goes out of their way to help others without
+      expecting anything in return. Your actions reminded me of the goodness that
+      exists in the world, and I will not forget it.
+
+# Packet generation settings
+packet_config:
+  default_task: "journal_entries"
+  items_per_packet: 5
+  include_qr_codes: true
+  free_format: true  # No ruled lines, just blank space for writing
+  page_margins:
+    top: 72  # 1 inch
+    bottom: 72
+    left: 54  # 0.75 inch
+    right: 54
+  writing_area:
+    min_height: 300  # Minimum points for writing area per entry
+    spacing_between_entries: 36  # Half inch between entries
