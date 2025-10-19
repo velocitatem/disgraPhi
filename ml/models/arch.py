@@ -29,6 +29,8 @@ from peft import (
     PeftModel
 )
 
+from alveslib import logger
+
 
 class QwenVLHandwritingModel(nn.Module):
     """
@@ -182,7 +184,8 @@ class QwenVLHandwritingModel(nn.Module):
         prompt: str = "Transcribe this handwritten text:",
         max_new_tokens: int = 128,
         temperature: float = 0.1,
-        top_p: float = 0.9
+        top_p: float = 0.9,
+        max_pixels: Optional[int] = None
     ) -> str:
         """
         Generate transcription for a handwritten line image.
@@ -193,32 +196,74 @@ class QwenVLHandwritingModel(nn.Module):
             max_new_tokens: Maximum tokens to generate
             temperature: Sampling temperature
             top_p: Nucleus sampling threshold
+            max_pixels: Maximum number of pixels to process (limits memory usage)
+                       Default: None (uses processor default, typically 12845056)
+                       Reduce for large images to prevent OOM
 
         Returns:
             Transcribed text
         """
-        # Prepare input
-        inputs = self.processor(
-            text=[prompt],
-            images=pixel_values,
-            return_tensors="pt"
-        ).to(self.model.device)
+        # Prepare input with controlled resolution
+        logger.info("Preparing to process inputs")
 
-        # Generate
+        # Build processor kwargs with memory limits
+        processor_kwargs = {
+            "text": [prompt],
+            "images": pixel_values,
+            "return_tensors": "pt"
+        }
+
+        # Add max_pixels if specified to limit vision token count
+        if max_pixels is not None:
+            processor_kwargs["max_pixels"] = max_pixels
+            logger.info(f"Limiting image to {max_pixels} pixels to control memory")
+
+        inputs = self.processor(**processor_kwargs)
+
+        # Log input size for debugging
+        if "pixel_values" in inputs:
+            pv_shape = inputs["pixel_values"].shape
+            logger.info(f"Processed pixel_values shape: {pv_shape}")
+        if "input_ids" in inputs:
+            logger.info(f"Input sequence length: {inputs['input_ids'].shape[1]}")
+
+        logger.info("Inputs processed")
+
+        # Move inputs to device one tensor at a time to avoid memory spike
+        device = self.model.device
+        inputs_on_device = {}
+
+        for key, value in inputs.items():
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            inputs_on_device[key] = value.to(device)
+
+        # Clear cache before generation
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        # Generate with controlled memory
         with torch.no_grad():
             output_ids = self.model.generate(
-                **inputs,
+                **inputs_on_device,
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
                 top_p=top_p,
                 do_sample=temperature > 0
             )
 
-        # Decode
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+
+        logger.info("Generation complete")
+
         generated_text = self.processor.batch_decode(
             output_ids,
             skip_special_tokens=True
         )[0]
+
+        logger.info("Generated text successfully")
 
         # Extract transcription (remove prompt)
         if prompt in generated_text:
