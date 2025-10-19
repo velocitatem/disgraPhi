@@ -345,20 +345,20 @@ class PacketProcessor:
                     f"Detected packet page {page_label} (id {page_id}) for {img_path}"
                 )
 
-            # Segment lines
-            line_imgs = self._segment_lines(aligned_img)
-            all_lines.extend(line_imgs)
+            # Extract textarea rectangles
+            textarea_imgs = self._extract_textareas(aligned_img)
+            all_lines.extend(textarea_imgs)
 
-        # Save cropped lines
-        saved_lines = []
-        for i, line_img in enumerate(all_lines):
-            line_id = f"line_{i:03d}"
-            line_path = self.lines_dir / f'{line_id}.png'
-            cv2.imwrite(str(line_path), line_img)
-            saved_lines.append(line_id)
+        # Save cropped textareas
+        saved_textareas = []
+        for i, textarea_img in enumerate(all_lines):
+            textarea_id = f"textarea_{i:03d}"
+            textarea_path = self.lines_dir / f'{textarea_id}.png'
+            cv2.imwrite(str(textarea_path), textarea_img)
+            saved_textareas.append(textarea_id)
 
         # Match with ground truth
-        matched_gt = self._match_ground_truth(saved_lines, ground_truth)
+        matched_gt = self._match_ground_truth(saved_textareas, ground_truth)
 
         # Save ground truth mapping
         gt_file = self.user_dir / 'ground_truth.json'
@@ -366,8 +366,8 @@ class PacketProcessor:
             json.dump(matched_gt, f, indent=2)
 
         return {
-            'lines_detected': len(saved_lines),
-            'lines_matched': len(matched_gt),
+            'textareas_detected': len(saved_textareas),
+            'textareas_matched': len(matched_gt),
             'output_dir': str(self.user_dir),
             'page_history': self.page_history,
         }
@@ -488,54 +488,76 @@ class PacketProcessor:
 
         return None
 
-    def _segment_lines(self, img: np.ndarray) -> List[np.ndarray]:
+    def _extract_textareas(self, img: np.ndarray) -> List[np.ndarray]:
         """
-        Segment image into individual text lines.
+        Extract complete textarea rectangles from the aligned page.
 
-        Uses horizontal projection to detect line boundaries.
+        Uses horizontal projection to detect content blocks (handwritten areas)
+        and extracts them as complete rectangles rather than individual lines.
         """
         # Convert to grayscale
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-        # Binarize
+        # Binarize to detect ink
         _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-        # Horizontal projection
+        # Use horizontal projection to find content blocks
         h_projection = np.sum(binary, axis=1)
 
-        # Find line boundaries (regions with significant ink)
-        threshold = np.mean(h_projection) * 0.3
-        in_line = h_projection > threshold
+        # Find regions with significant ink (handwritten content)
+        # Use a lower threshold to capture sparse writing
+        threshold = np.mean(h_projection) * 0.1
+        in_content = h_projection > threshold
 
-        # Detect transitions
-        lines = []
-        line_start = None
+        # Find content blocks
+        textareas = []
+        img_height, img_width = img.shape[:2]
+        block_start = None
+        min_block_height = 50  # Minimum height for a valid textarea
 
-        for i, is_line in enumerate(in_line):
-            if is_line and line_start is None:
-                line_start = i
-            elif not is_line and line_start is not None:
-                # Add some padding
-                y1 = max(0, line_start - 5)
-                y2 = min(img.shape[0], i + 5)
+        for i, has_content in enumerate(in_content):
+            if has_content and block_start is None:
+                block_start = i
+            elif not has_content and block_start is not None:
+                # Check if we have a large enough gap to consider this a separate block
+                block_height = i - block_start
 
-                # Crop line
-                line_img = img[y1:y2, :]
+                if block_height > min_block_height:
+                    # Extract the entire width of the content block
+                    # Add padding around the detected content
+                    padding_y = 15
+                    padding_x = 20
 
-                # Filter out very small lines (noise)
-                if line_img.shape[0] > 10:
-                    lines.append(line_img)
+                    y1 = max(0, block_start - padding_y)
+                    y2 = min(img_height, i + padding_y)
+                    x1 = padding_x  # Use small padding from left edge
+                    x2 = img_width - padding_x  # Use small padding from right edge
 
-                line_start = None
+                    textarea_img = img[y1:y2, x1:x2]
+                    textareas.append((block_start, textarea_img))
 
-        # Handle last line
-        if line_start is not None:
-            y1 = max(0, line_start - 5)
-            line_img = img[y1:, :]
-            if line_img.shape[0] > 10:
-                lines.append(line_img)
+                block_start = None
 
-        return lines
+        # Handle last block if it extends to the end
+        if block_start is not None:
+            block_height = img_height - block_start
+            if block_height > min_block_height:
+                padding_y = 15
+                padding_x = 20
+
+                y1 = max(0, block_start - padding_y)
+                y2 = img_height
+                x1 = padding_x
+                x2 = img_width - padding_x
+
+                textarea_img = img[y1:y2, x1:x2]
+                textareas.append((block_start, textarea_img))
+
+        # Sort textareas by vertical position (top to bottom)
+        textareas.sort(key=lambda t: t[0])
+
+        # Return just the images, without coordinates
+        return [textarea for _, textarea in textareas]
 
     def _match_ground_truth(
         self,

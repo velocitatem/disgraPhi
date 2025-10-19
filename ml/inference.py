@@ -214,7 +214,7 @@ class InferenceModel:
         )
 
         # Move to device
-        inputs = {k: v.to(self.model.model.device) for k, v in inputs.items()}
+        inputs = {k: v.to(self.model.model.device) for k, v in inputs.items()} # TODO: this is not great because if we have a big input it will not fit in the memory of the GPU - need to implement a more sequential way of loading the data because sometimes it would make us load 20GB
 
         # Generate
         with torch.no_grad():
@@ -240,6 +240,8 @@ class InferenceModel:
             skip_special_tokens=True
         )[0].strip()
 
+
+        # TODO: post process
         return transcription
 
     def transcribe_batch(

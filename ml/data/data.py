@@ -116,15 +116,15 @@ def process_packet(args):
     )
 
     print(f"\n✓ Packet processing complete")
-    print(f"  Lines detected: {results['lines_detected']}")
-    print(f"  Lines matched: {results['lines_matched']}")
+    print(f"  Textareas detected: {results['textareas_detected']}")
+    print(f"  Textareas matched: {results['textareas_matched']}")
     print(f"  Output: {results['output_dir']}")
 
-    if results['lines_matched'] < len(ground_truth):
-        print(f"\n⚠ Warning: Only {results['lines_matched']}/{len(ground_truth)} lines matched")
+    if results['textareas_matched'] < len(ground_truth):
+        print(f"\n⚠ Warning: Only {results['textareas_matched']}/{len(ground_truth)} textareas matched")
         print("  Check image quality and QR code visibility")
     else:
-        print(f"\n✓ All lines matched successfully")
+        print(f"\n✓ All textareas matched successfully")
         print(f"\nNext steps:")
         print(f"  Run personalization training:")
         print(f"  python ml/models/train.py --mode personalize --user-id {args.user_id}")

@@ -17,6 +17,7 @@ from typing import Optional, Dict, List, Tuple
 from pathlib import Path
 from transformers import (
     Qwen2VLForConditionalGeneration,
+    Qwen3VLForConditionalGeneration,
     AutoTokenizer,
     AutoProcessor,
     BitsAndBytesConfig
@@ -48,7 +49,7 @@ class QwenVLHandwritingModel(nn.Module):
 
     def __init__(
         self,
-        model_name: str = "Qwen/Qwen2-VL-7B-Instruct",
+        model_name: str = "Qwen/Qwen2-VL-4B-Instruct",
         lora_r: int = 8,
         lora_alpha: int = 16,
         lora_dropout: float = 0.05,
@@ -90,7 +91,7 @@ class QwenVLHandwritingModel(nn.Module):
 
         # Load base model
         print(f"Loading base model {model_name}...")
-        self.base_model = Qwen2VLForConditionalGeneration.from_pretrained(
+        self.base_model = Qwen3VLForConditionalGeneration.from_pretrained(
             model_name,
             device_map=device_map,
             trust_remote_code=True,
