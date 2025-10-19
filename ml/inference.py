@@ -153,19 +153,26 @@ class InferenceModel:
 
     def _preprocess_image(self, image: Image.Image) -> Image.Image:
         """
-        Preprocess image for inference.
+        Preprocess image for inference with JPEG compression.
 
         Args:
             image: PIL Image
 
         Returns:
-            Preprocessed PIL Image
+            Preprocessed PIL Image with compression applied
         """
         # Convert to RGB if needed
         if image.mode != 'RGB':
             image = image.convert('RGB')
 
-        return image
+        # Apply JPEG compression to reduce memory footprint
+        # This helps with the GPU memory issue mentioned in line 217
+        buffer = io.BytesIO()
+        image.save(buffer, format='JPEG', quality=85, optimize=True)
+        buffer.seek(0)
+        compressed_image = Image.open(buffer)
+
+        return compressed_image
 
     def transcribe(
         self,
@@ -212,9 +219,11 @@ class InferenceModel:
             return_tensors="pt",
             padding=True
         )
+        logger.info("About to transfer to device")
 
         # Move to device
         inputs = {k: v.to(self.model.model.device) for k, v in inputs.items()} # TODO: this is not great because if we have a big input it will not fit in the memory of the GPU - need to implement a more sequential way of loading the data because sometimes it would make us load 20GB
+        logger.info("Transfered to device")
 
         # Generate
         with torch.no_grad():
