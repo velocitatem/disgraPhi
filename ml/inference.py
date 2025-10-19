@@ -249,10 +249,8 @@ class InferenceModel:
             skip_special_tokens=True
         )[0].strip()
 
-        # Save temp image for post-processing
-        # TODO: post process
-        # Post-process transcription for readability
-        transcription = post_process_inference(transcription, image_path="temp.jpg")
+        # Post-process transcription for readability using the original image
+        transcription = post_process_inference(transcription, image)
 
         return transcription
 
