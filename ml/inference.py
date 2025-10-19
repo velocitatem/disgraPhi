@@ -20,7 +20,7 @@ from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from PIL import Image
-from alveslib import get_logger
+from alveslib import get_logger, post_process_inference
 
 from ml.models.arch import QwenVLHandwritingModel
 
@@ -249,8 +249,11 @@ class InferenceModel:
             skip_special_tokens=True
         )[0].strip()
 
-
+        # Save temp image for post-processing
         # TODO: post process
+        # Post-process transcription for readability
+        transcription = post_process_inference(transcription, image_path="temp.jpg")
+
         return transcription
 
     def transcribe_batch(

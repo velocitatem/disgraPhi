@@ -28,3 +28,4 @@ huggingface_hub
 pyyaml
 bitsandbytes
 jiwer
+openai
