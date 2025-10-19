@@ -51,7 +51,7 @@ class QwenVLHandwritingModel(nn.Module):
 
     def __init__(
         self,
-        model_name: str = "Qwen/Qwen2-VL-4B-Instruct",
+        model_name: str = "Qwen/Qwen3-VL-4B-Instruct",
         lora_r: int = 8,
         lora_alpha: int = 16,
         lora_dropout: float = 0.05,
