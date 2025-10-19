@@ -1,0 +1,215 @@
+# DisgraPhi Scaling Configuration
+# Configuration for batch training and distributed deployment
+
+# Batch Training Settings
+batch_training:
+  # Number of users to train in parallel on a single GPU
+  num_parallel: 8
+  
+  # Batch formation timeout (seconds)
+  # Wait this long to accumulate a full batch before training
+  batch_timeout: 60
+  
+  # Maximum queue size
+  max_queue_size: 1000
+  
+  # Auto-scaling settings
+  autoscale:
+    enabled: true
+    min_workers: 1
+    max_workers: 4
+    scale_up_threshold: 50  # Queue length to trigger scale up
+    scale_down_threshold: 10  # Queue length to trigger scale down
+
+# Progressive Training Settings
+progressive_training:
+  enabled: true
+  
+  # Checkpoints for training (samples needed)
+  checkpoints:
+    - name: "quick_start"
+      min_samples: 15
+      description: "Initial personalization"
+      auto_notify: true
+      
+    - name: "basic"
+      min_samples: 30
+      description: "Basic quality"
+      auto_notify: true
+      
+    - name: "standard"
+      min_samples: 50
+      description: "Recommended minimum"
+      auto_notify: true
+      
+    - name: "advanced"
+      min_samples: 75
+      description: "High quality"
+      auto_notify: false
+      
+    - name: "optimal"
+      min_samples: 100
+      description: "Maximum quality"
+      auto_notify: false
+  
+  # Continuous learning settings
+  continuous_learning:
+    enabled: true
+    retrain_threshold: 10  # Retrain after this many new samples
+    schedule: "nightly"  # Options: immediate, hourly, nightly, weekly
+
+# Model Training Parameters
+training:
+  # LoRA configuration
+  lora:
+    rank: 8
+    alpha: 16
+    dropout: 0.1
+    target_modules:
+      - "q_proj"
+      - "v_proj"
+      - "k_proj"
+      - "o_proj"
+  
+  # Training hyperparameters
+  hyperparameters:
+    learning_rate: 1e-5
+    batch_size: 2
+    gradient_accumulation_steps: 4
+    num_epochs: 3
+    warmup_ratio: 0.1
+    max_grad_norm: 1.0
+    
+  # Optimization
+  optimization:
+    use_8bit: false
+    use_4bit: true  # Use 4-bit quantization by default
+    use_gradient_checkpointing: true
+    
+  # Evaluation
+  evaluation:
+    eval_steps: 100
+    save_steps: 500
+    logging_steps: 10
+    eval_on_start: false
+
+# Infrastructure Settings
+infrastructure:
+  # GPU allocation
+  gpu:
+    devices: [0]  # GPU device IDs to use
+    memory_fraction: 0.9  # Fraction of GPU memory to use
+    allow_growth: true
+    
+  # Storage
+  storage:
+    backend: "local"  # Options: local, s3, minio, gcs
+    base_path: "ml/models/user_loras"
+    
+    # S3/MinIO configuration (if using object storage)
+    s3:
+      endpoint: null
+      bucket: "disgraphi-models"
+      access_key: null
+      secret_key: null
+    
+  # Queue backend
+  queue:
+    backend: "memory"  # Options: memory, redis, rabbitmq
+    
+    # Redis configuration
+    redis:
+      host: "localhost"
+      port: 6379
+      db: 0
+      password: null
+      
+    # RabbitMQ configuration
+    rabbitmq:
+      host: "localhost"
+      port: 5672
+      username: "guest"
+      password: "guest"
+      vhost: "/"
+
+# Monitoring & Analytics
+monitoring:
+  # TensorBoard
+  tensorboard:
+    enabled: true
+    log_dir: "ml/models/tensorboard"
+    update_freq: 10
+    
+  # Metrics tracking
+  metrics:
+    track_training_time: true
+    track_gpu_usage: true
+    track_queue_length: true
+    track_user_metrics: true
+    
+  # Alerts
+  alerts:
+    enabled: false
+    queue_threshold: 100  # Alert when queue exceeds this
+    failure_rate_threshold: 0.1  # Alert when >10% jobs fail
+    webhook_url: null
+
+# Data Collection Improvements
+data_collection:
+  # Mobile capture settings
+  mobile_capture:
+    enabled: false  # Not yet implemented
+    quality_checks:
+      blur_threshold: 100  # Laplacian variance threshold
+      min_contrast: 50
+      min_text_area: 0.1  # Minimum fraction of image with text
+      
+  # QR code settings  
+  qr_codes:
+    required: true  # Require QR codes for alignment
+    fallback_to_cv: true  # Use CV-based alignment if QR fails
+    
+  # Sample diversity tracking
+  diversity:
+    track_content_types: true
+    recommend_missing_types: true
+    content_types:
+      - letters
+      - numbers
+      - symbols
+      - cursive
+      - print
+
+# API Rate Limiting
+rate_limiting:
+  enabled: true
+  
+  # Per-user limits
+  per_user:
+    samples_per_hour: 100
+    training_jobs_per_day: 10
+    
+  # Global limits
+  global:
+    training_jobs_per_hour: 1000
+    max_concurrent_trainings: 50
+
+# Feature Flags
+features:
+  # Progressive training
+  progressive_training: true
+  
+  # Batch training
+  batch_training: true
+  
+  # Continuous learning
+  continuous_learning: true
+  
+  # User clustering (experimental)
+  user_clustering: false
+  
+  # Transfer learning across users (experimental)
+  transfer_learning: false
+  
+  # Mobile PWA capture (not yet implemented)
+  mobile_pwa: false
