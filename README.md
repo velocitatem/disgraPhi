@@ -17,3 +17,10 @@ Collect 40–120 line‑level pairs per user for LoRA SFT on the VLM's decoder.
 
 
 we need to define an app in streamlit and fastapi for inference and data handling. we create two training directories one for the global boostrap and then one for the fintuning on an individuals writing
+
+
+### Training Examples
+
+```bash
+python ml/models/train.py --output-dir ml/checkpoints/bootstrap_smolvlm256/ --model-type smolvlm-256m
+```

@@ -76,7 +76,7 @@ class DisgraPhiTrainer:
         warmup_steps: int = 0,  # 0 means auto-calculate as 30% of total steps
         log_every: int = 10,
         save_every: int = 500,
-        eval_every: int = 100,
+        eval_every: int = 50,
         max_grad_norm: float = 1.0
     ):
         self.model = model
@@ -159,50 +159,63 @@ class DisgraPhiTrainer:
         Collate function for batching.
 
         Processes images and text through the model's processor.
+        Supports different model architectures:
+        - Chat-based: Qwen3-VL, SmolVLM (use chat templates)
+        - Prompt-based: Florence-2 (use task prompts)
         """
         images = [item['image'] for item in batch]
         texts = [item['text'] for item in batch]
 
-        # Create messages for Qwen2-VL format
-        messages_batch = []
-        for text in texts:
-            messages_batch.append([
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image"},
-                        {"type": "text", "text": "Transcribe this handwritten text."}
-                    ]
-                },
-                {
-                    "role": "assistant",
-                    "content": [
-                        {"type": "text", "text": text}
-                    ]
-                }
-            ])
+        # Detect model type by checking if processor has a valid chat template
+        # Florence-2 has the method but raises an error, so we check the attribute directly
+        has_chat_template = (
+            hasattr(self.model.processor, 'apply_chat_template') and
+            hasattr(self.model.processor, 'chat_template') and
+            self.model.processor.chat_template is not None
+        )
 
-        # Process through Qwen processor
-        texts_formatted = [
-            self.model.processor.apply_chat_template(msg, tokenize=False, add_generation_prompt=False)
-            for msg in messages_batch
-        ]
+        if has_chat_template:
+            # Chat-based models (Qwen, SmolVLM)
+            messages_batch = []
+            for text in texts:
+                messages_batch.append([
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image"},
+                            {"type": "text", "text": "Transcribe this handwritten text."}
+                        ]
+                    },
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": text}
+                        ]
+                    }
+                ])
+
+            texts_formatted = [
+                self.model.processor.apply_chat_template(msg, tokenize=False, add_generation_prompt=False) if self.model.processor is not None else None
+                for msg in messages_batch
+            ]
+        else: # TODO: If adding new model make this elsif
+            # Prompt-based models (Florence-2)
+            # Florence-2 format: <TASK_PROMPT>text</s>
+            # For OCR task, we use <OCR> prompt
+            texts_formatted = [f"<OCR>" for text in texts]
 
         # Process without truncation to preserve image tokens
-        # Then manually truncate if needed while preserving structure
         inputs = self.model.processor(
             text=texts_formatted,
             images=images,
             return_tensors="pt",
             padding=True,
-            truncation=False  # Don't truncate to avoid cutting image tokens
+            truncation=False
         )
 
-        # If sequences are too long, we need to handle it differently
-        # For now, just ensure we don't truncate image tokens
+        # Handle long sequences
         max_seq_len = 1024  # Increase from 512 to accommodate image tokens
         if inputs['input_ids'].shape[1] > max_seq_len:
-            # Truncate from the right (text side) while preserving image tokens on left
             inputs['input_ids'] = inputs['input_ids'][:, :max_seq_len]
             inputs['attention_mask'] = inputs['attention_mask'][:, :max_seq_len]
 
@@ -212,7 +225,7 @@ class DisgraPhiTrainer:
 
         return {
             'pixel_values': inputs['pixel_values'],
-            'image_grid_thw': inputs.get('image_grid_thw'),  # Required by Qwen2-VL
+            'image_grid_thw': inputs.get('image_grid_thw'),  # Required by Qwen2-VL, optional for others
             'input_ids': inputs['input_ids'],
             'attention_mask': inputs['attention_mask'],
             'labels': labels
@@ -275,9 +288,16 @@ class DisgraPhiTrainer:
                         temperature=0.0  # Greedy decoding for eval
                     )
 
+                    # Handle models that return tuple (text, parsed_dict)
+                    # vs models that return just text
+                    if isinstance(prediction, tuple):
+                        prediction_text = prediction[0]  # Extract just the text
+                    else:
+                        prediction_text = prediction
+
                     samples.append({
                         'ground_truth': ground_truth,
-                        'prediction': prediction
+                        'prediction': prediction_text
                     })
 
                 except Exception as e:
@@ -292,24 +312,37 @@ class DisgraPhiTrainer:
         ground_truths: List[str]
     ) -> Dict[str, float]:
         """Compute Character Error Rate and Word Error Rate."""
+        logger.info(f"Computing CER/WER for {len(predictions)} predictions")
+
         # Filter out empty strings
         valid_pairs = [
             (pred, gt) for pred, gt in zip(predictions, ground_truths)
             if pred.strip() and gt.strip()
         ]
 
-        if not valid_pairs:
-            return {'cer': 0.0, 'wer': 0.0}
+        logger.info(f"Valid pairs after filtering: {len(valid_pairs)}/{len(predictions)}")
 
+        if not valid_pairs:
+            logger.warning("No valid prediction pairs found! All predictions or ground truths are empty.")
+            logger.warning(f"Sample predictions: {predictions[:3]}")
+            logger.warning(f"Sample ground truths: {ground_truths[:3]}")
+            return {'cer': None, 'wer': None}  # Return None to indicate failure, not 0
+
+        # Unzip into lists (not tuples) - jiwer expects list of strings
         preds, gts = zip(*valid_pairs)
+        preds = list(preds)
+        gts = list(gts)
 
         try:
             cer_score = cer(gts, preds) * 100  # Convert to percentage
             wer_score = wer(gts, preds) * 100
+            logger.info(f"CER: {cer_score:.2f}%, WER: {wer_score:.2f}%")
         except Exception as e:
-            logger.warning(f"Error computing CER/WER: {e}")
-            cer_score = 0.0
-            wer_score = 0.0
+            logger.error(f"Error computing CER/WER: {e}")
+            logger.error(f"Sample preds: {preds[:3]}")
+            logger.error(f"Sample gts: {gts[:3]}")
+            cer_score = None
+            wer_score = None
 
         return {
             'cer': cer_score,
@@ -448,8 +481,15 @@ class DisgraPhiTrainer:
 
         # Compute CER/WER on samples
         if sample_predictions:
+            logger.info(f"Generated {len(sample_predictions)} sample predictions")
             predictions = [s['prediction'] for s in sample_predictions]
             ground_truths = [s['ground_truth'] for s in sample_predictions]
+
+            # Log first sample for debugging
+            if sample_predictions:
+                logger.info(f"Sample 1 GT: {ground_truths[0][:50]}...")
+                logger.info(f"Sample 1 Pred: {predictions[0][:50]}...")
+
             error_metrics = self._compute_cer_wer(predictions, ground_truths)
 
             # Log sample predictions as text
@@ -461,15 +501,17 @@ class DisgraPhiTrainer:
             ])
             self.writer.add_text('val/sample_predictions', samples_text, self.global_step)
 
-            # Log error metrics
-            self.writer.add_scalar('val/cer', error_metrics['cer'], self.global_step)
-            self.writer.add_scalar('val/wer', error_metrics['wer'], self.global_step)
-
-            logger.info(f"Validation CER: {error_metrics['cer']:.2f}%")
-            logger.info(f"Validation WER: {error_metrics['wer']:.2f}%")
+            # Log error metrics (only if not None)
+            if error_metrics['cer'] is not None:
+                self.writer.add_scalar('val/cer', error_metrics['cer'], self.global_step)
+                self.writer.add_scalar('val/wer', error_metrics['wer'], self.global_step)
+                logger.info(f"Validation CER: {error_metrics['cer']:.2f}%")
+                logger.info(f"Validation WER: {error_metrics['wer']:.2f}%")
+            else:
+                logger.error("Failed to compute CER/WER - predictions may be empty")
         else:
-            error_metrics = {'cer': 0.0, 'wer': 0.0}
-            logger.warning("No sample predictions generated")
+            error_metrics = {'cer': None, 'wer': None}
+            logger.error("No sample predictions generated - check model.generate() method")
 
         # Log basic metrics
         self.writer.add_scalar('val/loss', avg_val_loss, self.global_step)
@@ -479,7 +521,7 @@ class DisgraPhiTrainer:
         logger.info(f"Validation Perplexity: {val_perplexity:.2f}")
 
         # Save best model based on CER (if available) or loss
-        if sample_predictions and error_metrics['cer'] < self.best_val_cer:
+        if error_metrics['cer'] is not None and error_metrics['cer'] < self.best_val_cer:
             self.best_val_cer = error_metrics['cer']
             self.save_checkpoint('best_model_cer')
             logger.info(f"New best model saved (val_cer: {error_metrics['cer']:.2f}%)")
