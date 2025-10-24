@@ -1,6 +1,11 @@
 """
 DisgraPhi Training Loop
 
+Unified training for all vision-language models:
+- Qwen3-VL (4B/7B)
+- SmolVLM (256M/500M/2.2B)
+- Future models...
+
 Two-stage training:
 1. Bootstrap: Train on IAM database (~115k lines)
 2. Personalization: Fine-tune on user data (40-120 lines)
@@ -11,6 +16,7 @@ Features:
 - Gradient accumulation
 - Mixed precision training
 - Checkpoint management
+- Model-agnostic via BaseVisionLanguageModel interface
 """
 
 import os
@@ -27,11 +33,7 @@ import numpy as np
 from jiwer import cer, wer
 from alveslib import get_logger
 
-from ml.models.arch import (
-    create_bootstrap_model,
-    create_personalization_model,
-    QwenVLHandwritingModel
-)
+from ml.models.providers import create_model, MODEL_REGISTRY, BaseVisionLanguageModel
 from ml.data.datasets import IAMDataset, PersonalizationDataset
 
 
@@ -40,13 +42,16 @@ logger = get_logger("ml-trainloop")
 
 class DisgraPhiTrainer:
     """
-    Trainer for DisgraPhi handwriting recognition models.
+    Universal trainer for vision-language models.
+
+    Works with any model implementing BaseVisionLanguageModel interface.
 
     Args:
-        model: QwenVLHandwritingModel instance
+        model: BaseVisionLanguageModel instance (Qwen3, SmolVLM, etc.)
         train_dataset: Training dataset
         val_dataset: Validation dataset
         output_dir: Directory to save checkpoints and logs
+        experiment_name: Name for tensorboard logging
         learning_rate: Learning rate
         batch_size: Batch size per device
         gradient_accumulation_steps: Steps to accumulate gradients
@@ -59,10 +64,11 @@ class DisgraPhiTrainer:
 
     def __init__(
         self,
-        model: QwenVLHandwritingModel,
+        model: BaseVisionLanguageModel,
         train_dataset,
         val_dataset,
         output_dir: str,
+        experiment_name: str = "default",
         learning_rate: float = 1e-5,
         batch_size: int = 2,
         gradient_accumulation_steps: int = 4,
@@ -74,6 +80,7 @@ class DisgraPhiTrainer:
         max_grad_norm: float = 1.0
     ):
         self.model = model
+        self.experiment_name = experiment_name
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
         self.output_dir = Path(output_dir)
@@ -109,9 +116,10 @@ class DisgraPhiTrainer:
             collate_fn=self._collate_fn
         )
 
-        # Setup optimizer (only LoRA parameters)
+        # Setup optimizer (only trainable parameters)
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
         self.optimizer = torch.optim.AdamW(
-            model.model.parameters(),
+            trainable_params,
             lr=learning_rate,
             betas=(0.9, 0.999),
             weight_decay=0.05  # Increased from 0.01 for better regularization
@@ -128,7 +136,8 @@ class DisgraPhiTrainer:
         )
 
         # Tensorboard writer
-        self.writer = SummaryWriter(log_dir=str(self.output_dir / 'tensorboard'))
+        log_dir = self.output_dir / 'tensorboard' / experiment_name
+        self.writer = SummaryWriter(log_dir=str(log_dir))
 
         # Training state
         self.global_step = 0
@@ -212,8 +221,8 @@ class DisgraPhiTrainer:
     def _compute_gradient_norm(self) -> float:
         """Compute the global gradient norm across all parameters."""
         total_norm = 0.0
-        for p in self.model.model.parameters():
-            if p.grad is not None:
+        for p in self.model.parameters():
+            if p.grad is not None and p.requires_grad:
                 param_norm = p.grad.data.norm(2)
                 total_norm += param_norm.item() ** 2
         total_norm = total_norm ** 0.5
@@ -222,7 +231,7 @@ class DisgraPhiTrainer:
     def _log_parameter_stats(self) -> Dict[str, float]:
         """Compute statistics for LoRA parameters."""
         stats = {}
-        for name, param in self.model.model.named_parameters():
+        for name, param in self.model.named_parameters():
             if 'lora' in name.lower() and param.requires_grad:
                 stats[f'params/{name}/mean'] = param.data.mean().item()
                 stats[f'params/{name}/std'] = param.data.std().item()
@@ -238,7 +247,7 @@ class DisgraPhiTrainer:
         num_samples: int = 3
     ) -> List[Dict[str, str]]:
         """Generate sample predictions for qualitative evaluation."""
-        self.model.model.eval()
+        self.model.eval()
         samples = []
 
         # Get a few samples from validation set
@@ -253,54 +262,18 @@ class DisgraPhiTrainer:
                 image = sample['image']
                 ground_truth = sample['text']
 
-                # Prepare input
                 try:
-                    # Convert PIL image to tensor if needed
+                    # Convert PIL image to RGB if needed
                     if hasattr(image, 'convert'):
                         image = image.convert('RGB')
 
-                    # Create chat template with generation prompt
-                    messages = [
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "image"},
-                                {"type": "text", "text": "Transcribe this handwritten text."}
-                            ]
-                        }
-                    ]
-
-                    # Apply chat template with generation prompt
-                    text_prompt = self.model.processor.apply_chat_template(
-                        messages,
-                        tokenize=False,
-                        add_generation_prompt=True
-                    )
-
-                    # Process input
-                    inputs = self.model.processor(
-                        text=[text_prompt],
-                        images=[image],
-                        return_tensors="pt",
-                        padding=True
-                    )
-
-                    # Move to device
-                    inputs = {k: v.to(self.model.model.device) for k, v in inputs.items()}
-
-                    # Generate
-                    output_ids = self.model.model.generate(
-                        **inputs,
+                    # Use model's generate method (unified interface)
+                    prediction = self.model.generate(
+                        pixel_values=image,
+                        prompt="Transcribe this handwritten text.",
                         max_new_tokens=128,
-                        do_sample=False
+                        temperature=0.0  # Greedy decoding for eval
                     )
-
-                    # Decode only the generated tokens (skip input)
-                    generated_ids = output_ids[:, inputs['input_ids'].shape[1]:]
-                    prediction = self.model.processor.batch_decode(
-                        generated_ids,
-                        skip_special_tokens=True
-                    )[0].strip()
 
                     samples.append({
                         'ground_truth': ground_truth,
@@ -345,7 +318,7 @@ class DisgraPhiTrainer:
 
     def train_epoch(self):
         """Train for one epoch."""
-        self.model.model.train()
+        self.model.train()
         total_loss = 0
         num_batches = 0
 
@@ -356,7 +329,7 @@ class DisgraPhiTrainer:
 
         for step, batch in enumerate(progress_bar):
             # Move batch to device
-            batch = {k: v.to(self.model.model.device) for k, v in batch.items()}
+            batch = {k: v.to(self.model.device) for k, v in batch.items() if v is not None}
 
             # Forward pass
             outputs = self.model(
@@ -382,7 +355,7 @@ class DisgraPhiTrainer:
 
                 # Clip gradients
                 torch.nn.utils.clip_grad_norm_(
-                    self.model.model.parameters(),
+                    self.model.parameters(),
                     self.max_grad_norm
                 )
 
@@ -433,7 +406,7 @@ class DisgraPhiTrainer:
                 # Evaluation
                 if self.global_step % self.eval_every == 0:
                     self.evaluate()
-                    self.model.model.train()
+                    self.model.train()
 
                 # Save checkpoint
                 if self.global_step % self.save_every == 0:
@@ -443,7 +416,7 @@ class DisgraPhiTrainer:
 
     def evaluate(self):
         """Run evaluation on validation set with comprehensive metrics."""
-        self.model.model.eval()
+        self.model.eval()
         total_loss = 0
         num_batches = 0
 
@@ -452,7 +425,7 @@ class DisgraPhiTrainer:
         with torch.no_grad():
             for batch in tqdm(self.val_loader, desc="Evaluating"):
                 # Move batch to device
-                batch = {k: v.to(self.model.model.device) for k, v in batch.items()}
+                batch = {k: v.to(self.model.device) for k, v in batch.items() if v is not None}
 
                 # Forward pass
                 outputs = self.model(
@@ -509,12 +482,12 @@ class DisgraPhiTrainer:
         if sample_predictions and error_metrics['cer'] < self.best_val_cer:
             self.best_val_cer = error_metrics['cer']
             self.save_checkpoint('best_model_cer')
-            logger.info(f"✓ New best model saved (val_cer: {error_metrics['cer']:.2f}%)")
+            logger.info(f"New best model saved (val_cer: {error_metrics['cer']:.2f}%)")
 
         if avg_val_loss < self.best_val_loss:
             self.best_val_loss = avg_val_loss
             self.save_checkpoint('best_model_loss')
-            logger.info(f"✓ New best model saved (val_loss: {avg_val_loss:.4f})")
+            logger.info(f"New best model saved (val_loss: {avg_val_loss:.4f})")
 
         return avg_val_loss
 
@@ -574,15 +547,24 @@ class DisgraPhiTrainer:
 def main():
     """CLI for training."""
     parser = argparse.ArgumentParser(
-        description="Train DisgraPhi handwriting recognition model"
+        description="Train DisgraPhi vision-language models (unified)"
     )
 
-    # Mode
+    # Model selection
+    parser.add_argument(
+        '--model-type',
+        type=str,
+        choices=list(MODEL_REGISTRY.keys()),
+        required=True,
+        help='Model type to train (e.g., qwen3-vl-4b, smolvlm-256m)'
+    )
+
+    # Training mode
     parser.add_argument(
         '--mode',
         type=str,
         choices=['bootstrap', 'personalize'],
-        required=True,
+        default='bootstrap',
         help='Training mode: bootstrap (IAM) or personalize (user-specific)'
     )
 
@@ -606,12 +588,6 @@ def main():
 
     # Model config
     parser.add_argument(
-        '--model-name',
-        type=str,
-        default='Qwen/Qwen2-VL-7B-Instruct',
-        help='Hugging Face model ID'
-    )
-    parser.add_argument(
         '--lora-r',
         type=int,
         default=8,
@@ -624,9 +600,14 @@ def main():
         help='LoRA alpha'
     )
     parser.add_argument(
-        '--no-quantization',
+        '--load-in-4bit',
         action='store_true',
-        help='Disable 4-bit quantization'
+        help='Enable 4-bit quantization'
+    )
+    parser.add_argument(
+        '--load-in-8bit',
+        action='store_true',
+        help='Enable 8-bit quantization'
     )
 
     # Training config
@@ -635,6 +616,12 @@ def main():
         type=str,
         required=True,
         help='Output directory for checkpoints and logs'
+    )
+    parser.add_argument(
+        '--experiment-name',
+        type=str,
+        default='default',
+        help='Experiment name for tensorboard logging'
     )
     parser.add_argument(
         '--learning-rate',
@@ -688,17 +675,19 @@ def main():
         if not args.bootstrap_adapter:
             parser.error("--bootstrap-adapter required for personalize mode")
 
-    # Create model
-    logger.info("Loading model...")
-    if args.mode == 'bootstrap':
-        model = create_bootstrap_model(
-            model_name=args.model_name,
-            lora_r=args.lora_r,
-            lora_alpha=args.lora_alpha,
-            load_in_4bit=not args.no_quantization
-        )
+    # Create model using unified provider system
+    logger.info(f"Creating model: {args.model_type}")
+    model = create_model(
+        model_type=args.model_type,
+        lora_r=args.lora_r,
+        lora_alpha=args.lora_alpha,
+        load_in_4bit=args.load_in_4bit,
+        load_in_8bit=args.load_in_8bit,
+        bootstrap_adapter_path=args.bootstrap_adapter if args.mode == 'personalize' else None
+    )
 
-        # Load datasets
+    # Load datasets
+    if args.mode == 'bootstrap':
         logger.info("Loading IAM datasets...")
         train_dataset = IAMDataset(
             data_dir=args.data_dir,
@@ -708,17 +697,7 @@ def main():
             data_dir=args.data_dir,
             split='val'
         )
-
     else:  # personalize
-        model = create_personalization_model(
-            bootstrap_adapter_path=args.bootstrap_adapter,
-            model_name=args.model_name,
-            lora_r=args.lora_r,
-            lora_alpha=args.lora_alpha,
-            load_in_4bit=not args.no_quantization
-        )
-
-        # Load user dataset
         logger.info(f"Loading user dataset from {args.user_dir}...")
         full_dataset = PersonalizationDataset(user_dir=args.user_dir)
 
@@ -732,11 +711,13 @@ def main():
         )
 
     # Create trainer
+    experiment_name = args.experiment_name or f"{args.model_type}_{args.mode}"
     trainer = DisgraPhiTrainer(
         model=model,
         train_dataset=train_dataset,
         val_dataset=val_dataset,
         output_dir=args.output_dir,
+        experiment_name=experiment_name,
         learning_rate=args.learning_rate,
         batch_size=args.batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,

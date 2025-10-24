@@ -5,8 +5,15 @@ FastAPI server for handwriting recognition inference using trained LoRA adapters
 
 Environment Variables:
     ML_ADAPTER_PATH: Path to LoRA adapter checkpoint (required)
-    ML_MODEL_NAME: Hugging Face model name (default: Qwen/Qwen2-VL-7B-Instruct)
+    ML_MODEL_NAME: Hugging Face model name (default: smolvlm-256m)
     ML_DEVICE: Device to run inference on (default: auto)
+    ML_INFERENCE_PORT: Port to run server on (default: 8000)
+    ML_INFERENCE_TIMEOUT: Request timeout in seconds (default: 300)
+
+Timeout Configuration:
+    The server is configured to handle long-running inference tasks without timing out.
+    Default timeout is 300 seconds (5 minutes) which should be sufficient for most
+    inference workloads including batch processing. Adjust ML_INFERENCE_TIMEOUT as needed.
 """
 
 import os
@@ -16,13 +23,15 @@ from typing import Optional, List
 from pathlib import Path
 
 import torch
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Request
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+import asyncio
 from PIL import Image
 from alveslib import get_logger, post_process_inference
 
-from ml.models.arch import QwenVLHandwritingModel
+from ml.models.providers import create_model, MODEL_REGISTRY, BaseVisionLanguageModel
 
 
 logger = get_logger("ml-inference")
@@ -38,11 +47,9 @@ if ADAPTER_PATH is None:
         "ML_ADAPTER_PATH environment variable not set. "
         "Point it to your LoRA adapter checkpoint directory."
     )
-
-MODEL_NAME = os.getenv("ML_MODEL_NAME", "Qwen/Qwen2-VL-7B-Instruct")
+MODEL_NAME = os.getenv("ML_MODEL_NAME", "smolvlm-256m")
 DEVICE = os.getenv("ML_DEVICE", "auto")
 
-logger.info(f"Loading model from: {MODEL_NAME}")
 logger.info(f"Loading adapter from: {ADAPTER_PATH}")
 logger.info(f"Device: {DEVICE}")
 
@@ -137,17 +144,13 @@ class InferenceModel:
         logger.info(f"Initializing model on device: {self.device}")
 
         # Load model with adapter
-        self.model = QwenVLHandwritingModel(
-            model_name=model_name,
-            load_in_4bit=True if self.device == "cuda" else False
-        )
-
+        self.model = create_model('smolvlm-256m')
         # Load LoRA adapter
         logger.info(f"Loading adapter from: {adapter_path}")
         self.model.load_adapter(adapter_path)
 
         # Set to eval mode
-        self.model.model.eval()
+        self.model.eval()
 
         logger.info("Model loaded successfully")
 
@@ -194,63 +197,27 @@ class InferenceModel:
         # Preprocess
         image = self._preprocess_image(image)
 
-        # Create chat template
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image"},
-                    {"type": "text", "text": "Transcribe this handwritten text."}
-                ]
-            }
-        ]
-
-        # Apply chat template with generation prompt
-        text_prompt = self.model.processor.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True
-        )
-
-        # Process inputs
-        inputs = self.model.processor(
-            text=[text_prompt],
-            images=[image],
-            return_tensors="pt",
-            padding=True
-        )
-        logger.info("About to transfer to device")
-
-        # Move to device
-        inputs = {k: v.to(self.model.model.device) for k, v in inputs.items()} # TODO: this is not great because if we have a big input it will not fit in the memory of the GPU - need to implement a more sequential way of loading the data because sometimes it would make us load 20GB
         logger.info("Transfered to device")
 
         # Generate
         with torch.no_grad():
             if temperature > 0:
-                output_ids = self.model.model.generate(
-                    **inputs,
+                transcription = self.model.generate(
+                    pixel_values=image,
+                    prompt="Transcribe this handwritten text.",
                     max_new_tokens=max_length,
                     temperature=temperature,
-                    do_sample=True,
-                    top_p=0.9
                 )
             else:
-                output_ids = self.model.model.generate(
-                    **inputs,
+                transcription = self.model.generate(
+                    pixel_values=image,
+                    prompt="Transcribe this handwritten text.",
                     max_new_tokens=max_length,
-                    do_sample=False
                 )
-
-        # Decode only generated tokens
-        generated_ids = output_ids[:, inputs['input_ids'].shape[1]:]
-        transcription = self.model.processor.batch_decode(
-            generated_ids,
-            skip_special_tokens=True
-        )[0].strip()
 
         # Post-process transcription for readability using the original image
         transcription = post_process_inference(transcription, image)
+        print(transcription)
 
         return transcription
 
@@ -313,8 +280,46 @@ except Exception as e:
 app = FastAPI(
     title="DisgraPhi Inference API",
     description="Handwriting recognition inference using Qwen2-VL with LoRA",
-    version="1.0.0"
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
 )
+
+# Add CORS middleware for web requests
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Configure this properly in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Timeout middleware for long-running requests
+@app.middleware("http")
+async def timeout_middleware(request: Request, call_next):
+    """
+    Middleware to handle request timeouts gracefully.
+    This ensures long-running inference tasks don't timeout prematurely.
+    """
+    try:
+        # Get timeout from environment or use default
+        timeout = int(os.getenv("ML_INFERENCE_TIMEOUT", "300"))
+
+        # Process request with timeout
+        response = await asyncio.wait_for(
+            call_next(request),
+            timeout=timeout
+        )
+        return response
+    except asyncio.TimeoutError:
+        logger.error(f"Request timeout after {timeout}s: {request.url.path}")
+        return JSONResponse(
+            status_code=504,
+            content={
+                "detail": f"Request timeout after {timeout} seconds. "
+                          f"Consider increasing ML_INFERENCE_TIMEOUT or reducing batch size."
+            }
+        )
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -446,12 +451,16 @@ if __name__ == "__main__":
     import uvicorn
 
     port = int(os.getenv("ML_INFERENCE_PORT", "8000"))
+    timeout = int(os.getenv("ML_INFERENCE_TIMEOUT", "300"))
 
     logger.info(f"Starting server on port {port}")
+    logger.info(f"Request timeout set to {timeout}s")
 
     uvicorn.run(
         app,
         host="0.0.0.0",
         port=port,
-        log_level="info"
+        log_level="info",
+        timeout_keep_alive=timeout,
+        timeout_graceful_shutdown=30
     )
