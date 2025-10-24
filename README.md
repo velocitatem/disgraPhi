@@ -1,3 +1,5 @@
+![](./banner.png)
+
 # Dysgrafix
 A tool to help people with dysgraphia. WE take a model like Qwen3-VL and create a main fork with a LoRA adapter that we initally train on:
 https://fki.tic.heia-fr.ch/databases/iam-handwriting-database?
