@@ -215,9 +215,10 @@ class InferenceModel:
                     max_new_tokens=max_length,
                 )
 
+        print(f"BEFORE:\n{transcription}")
         # Post-process transcription for readability using the original image
         transcription = post_process_inference(transcription, image)
-        print(transcription)
+        print(f"AFTER:\n{transcription}")
 
         return transcription
 
@@ -432,6 +433,7 @@ async def transcribe_file(file: UploadFile = File(...)):
         text = model.transcribe(image=image)
 
         logger.info(f"File transcription complete: {len(text)} characters")
+        print(text)
 
         return TranscriptionOutput(text=text, confidence=None)
 

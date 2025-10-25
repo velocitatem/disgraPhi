@@ -8,11 +8,12 @@ This module provides:
 """
 
 from .etl import IAMDownloader, PacketProcessor
-from .datasets import IAMDataset, PersonalizationDataset
+from .datasets import IAMDataset, PersonalizationDataset, ManifestDataset
 
 __all__ = [
     'IAMDownloader',
     'PacketProcessor',
     'IAMDataset',
     'PersonalizationDataset',
+    'ManifestDataset',
 ]

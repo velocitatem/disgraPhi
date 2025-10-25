@@ -34,7 +34,7 @@ from jiwer import cer, wer
 from alveslib import get_logger
 
 from ml.models.providers import create_model, MODEL_REGISTRY, BaseVisionLanguageModel
-from ml.data.datasets import IAMDataset, PersonalizationDataset
+from ml.data.datasets import IAMDataset, PersonalizationDataset, ManifestDataset
 
 
 logger = get_logger("ml-trainloop")
@@ -741,16 +741,37 @@ def main():
         )
     else:  # personalize
         logger.info(f"Loading user dataset from {args.user_dir}...")
-        full_dataset = PersonalizationDataset(user_dir=args.user_dir)
 
-        # Split into train/val (80/20)
-        train_size = int(0.8 * len(full_dataset))
-        val_size = len(full_dataset) - train_size
+        # Check if using new manifest format
+        from pathlib import Path
+        manifest_path = Path(args.user_dir) / 'manifest.json'
 
-        train_dataset, val_dataset = torch.utils.data.random_split(
-            full_dataset,
-            [train_size, val_size]
-        )
+        if manifest_path.exists():
+            # Use ManifestDataset with built-in split support
+            logger.info("Using ManifestDataset (new format)")
+            train_dataset = ManifestDataset(
+                data_dir=args.user_dir,
+                split=0.8,
+                split_type='train'
+            )
+            val_dataset = ManifestDataset(
+                data_dir=args.user_dir,
+                split=0.8,
+                split_type='val'
+            )
+        else:
+            # Fallback to PersonalizationDataset for old format TODO: delte
+            logger.info("Using PersonalizationDataset (old format - deprecated)")
+            full_dataset = PersonalizationDataset(user_dir=args.user_dir)
+
+            # Split into train/val (80/20)
+            train_size = int(0.8 * len(full_dataset))
+            val_size = len(full_dataset) - train_size
+
+            train_dataset, val_dataset = torch.utils.data.random_split(
+                full_dataset,
+                [train_size, val_size]
+            )
 
     # Create trainer
     experiment_name = args.experiment_name or f"{args.model_type}_{args.mode}"

@@ -35,6 +35,7 @@ from alveslib import logger
 
 # Model name mapping
 MODEL_NAMES = {
+    'qwen3-vl-2b': 'Qwen/Qwen3-VL-2B-Instruct',
     'qwen3-vl-4b': 'Qwen/Qwen3-VL-4B-Instruct',
     'qwen3-vl-7b': 'Qwen/Qwen2-VL-7B-Instruct',
 }
@@ -49,7 +50,8 @@ class Qwen3VLModel(BaseVisionLanguageModel):
         lora_r: LoRA rank (default: 8)
         lora_alpha: LoRA scaling factor (default: 16)
         lora_dropout: LoRA dropout (default: 0.05)
-        load_in_4bit: Use 4-bit quantization for memory efficiency
+        load_in_4bit: Use 4-bit quantization for memory efficiency (default: True)
+        load_in_8bit: Use 8-bit quantization (alternative to 4-bit, default: False)
         bootstrap_adapter_path: Path to frozen bootstrap adapter (for personalization)
         device_map: Device mapping strategy
     """
@@ -61,6 +63,7 @@ class Qwen3VLModel(BaseVisionLanguageModel):
         lora_alpha: int = 16,
         lora_dropout: float = 0.05,
         load_in_4bit: bool = True,
+        load_in_8bit: bool = False,
         bootstrap_adapter_path: Optional[str] = None,
         device_map: str = "auto"
     ):
@@ -87,16 +90,16 @@ class Qwen3VLModel(BaseVisionLanguageModel):
         )
 
         # Configure quantization if enabled
-        if load_in_4bit:
-            print("Configuring 4-bit quantization...")
+        bnb_config = None
+        if load_in_4bit or load_in_8bit:
+            print(f"Configuring {'4-bit' if load_in_4bit else '8-bit'} quantization...")
             bnb_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_use_double_quant=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.bfloat16
+                load_in_4bit=load_in_4bit,
+                load_in_8bit=load_in_8bit,
+                bnb_4bit_use_double_quant=True if load_in_4bit else None,
+                bnb_4bit_quant_type="nf4" if load_in_4bit else None,
+                bnb_4bit_compute_dtype=torch.bfloat16 if load_in_4bit else None
             )
-        else:
-            bnb_config = None
 
         # Load base model
         print(f"Loading base model {self.model_name}...")

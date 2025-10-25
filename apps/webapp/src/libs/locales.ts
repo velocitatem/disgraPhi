@@ -14,11 +14,12 @@ export function getLocale(locale: string = 'en') {
 export function t(key: string, locale: string = 'en') {
   const translations = getLocale(locale);
   const keys = key.split('.');
-  
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let value: any = translations;
   for (const k of keys) {
     value = value?.[k];
   }
-  
+
   return value || key;
 }

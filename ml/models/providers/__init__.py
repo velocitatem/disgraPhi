@@ -3,7 +3,7 @@ Model Providers for DisgraPhi
 pip install einops timm
 
 Unified interface for different vision-language models:
-- Qwen3-VL (4B/7B)
+- Qwen3-VL (2B/4B/7B)
 - SmolVLM (256M/500M/2.2B)
 - Florence-2 (Base/Large/Base-FT/Large-FT)
 - Future models...
@@ -18,6 +18,7 @@ from .florence2 import Florence2Model
 
 # Model registry for easy instantiation
 MODEL_REGISTRY = {
+    'qwen3-vl-2b': Qwen3VLModel,
     'qwen3-vl-4b': Qwen3VLModel,
     'qwen3-vl-7b': Qwen3VLModel,
     'smolvlm-256m': SmolVLMModel,

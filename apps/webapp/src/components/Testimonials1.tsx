@@ -11,7 +11,7 @@ export default function Testimonials1() {
         <div>
           {common.testimonials.items.map((testimonial, index) => (
             <div key={index}>
-              <p>"{testimonial.content}"</p>
+              <p>&ldquo;{testimonial.content}&rdquo;</p>
               <div>
                 <p>{testimonial.name}</p>
                 <p>{testimonial.role}</p>

@@ -147,18 +147,32 @@ class SmolVLMModel(BaseVisionLanguageModel):
             task_type="CAUSAL_LM"
         )
 
-        # Apply LoRA
-        print("Applying LoRA adapter...")
-        self.model = get_peft_model(self.base_model, lora_config)
-
         # Load bootstrap adapter if provided (for personalization mode)
         if bootstrap_adapter_path:
             print(f"Loading bootstrap adapter from {bootstrap_adapter_path}...")
+            # First load the bootstrap adapter as base
             self.model = PeftModel.from_pretrained(
                 self.base_model,
                 bootstrap_adapter_path,
-                is_trainable=False  # Freeze bootstrap adapter
+                is_trainable=False,  # Freeze bootstrap adapter
+                adapter_name="bootstrap"
             )
+
+            # Now add a new trainable adapter on top for personalization
+            print("Adding new trainable personalization adapter...")
+            self.model.add_adapter("personalization", lora_config)
+            self.model.set_adapter("personalization")  # Set as active adapter
+
+            # Ensure bootstrap adapter is frozen and personalization is trainable
+            for name, param in self.model.named_parameters():
+                if "bootstrap" in name:
+                    param.requires_grad = False
+                elif "personalization" in name:
+                    param.requires_grad = True
+        else:
+            # Bootstrap training: just apply LoRA
+            print("Applying LoRA adapter...")
+            self.model = get_peft_model(self.base_model, lora_config)
 
         # Print trainable parameters
         self.print_trainable_parameters()
@@ -316,13 +330,45 @@ class SmolVLMModel(BaseVisionLanguageModel):
         print("✓ Adapter saved")
 
     def load_adapter(self, adapter_path: str) -> None:
-        """Load a LoRA adapter from disk."""
-        print(f"Loading LoRA adapter from {adapter_path}...")
-        self.model = PeftModel.from_pretrained(
-            self.base_model,
-            adapter_path
-        )
-        print("✓ Adapter loaded")
+        """
+        Load a LoRA adapter from disk.
+
+        Supports both single adapters and stacked adapters (bootstrap + personalization).
+        If the path contains both 'bootstrap/' and 'personalization/' subdirectories,
+        it will load both as a stacked adapter configuration.
+        """
+        adapter_path = Path(adapter_path)
+
+        # Check if this is a stacked adapter (bootstrap + personalization)
+        bootstrap_dir = adapter_path / 'bootstrap'
+        personalization_dir = adapter_path / 'personalization'
+
+        if bootstrap_dir.exists() and personalization_dir.exists():
+            print(f"Loading stacked adapters from {adapter_path}...")
+            print("  - Loading bootstrap adapter (frozen)...")
+            self.model = PeftModel.from_pretrained(
+                self.base_model,
+                str(bootstrap_dir),
+                adapter_name="bootstrap"
+            )
+
+            print("  - Loading personalization adapter...")
+            self.model.load_adapter(str(personalization_dir), adapter_name="personalization")
+
+            # Set personalization as the active adapter for inference
+            # Both adapters will be used (bootstrap is merged into base, personalization adds on top)
+            self.model.set_adapter("personalization")
+            print("✓ Stacked adapters loaded (bootstrap + personalization)")
+            print(f"  Available adapters: {list(self.model.peft_config.keys())}")
+            print(f"  Active adapter: personalization")
+        else:
+            # Single adapter
+            print(f"Loading single adapter from {adapter_path}...")
+            self.model = PeftModel.from_pretrained(
+                self.base_model,
+                str(adapter_path)
+            )
+            print("✓ Adapter loaded")
 
     def get_trainable_parameters(self) -> int:
         """Get count of trainable parameters."""

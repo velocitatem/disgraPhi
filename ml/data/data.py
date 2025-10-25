@@ -20,7 +20,7 @@ load_dotenv()
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from ml.data.etl import IAMDownloader, PacketProcessor
-from ml.data.datasets import IAMDataset, PersonalizationDataset
+from ml.data.datasets import IAMDataset, PersonalizationDataset, ManifestDataset
 from src.packet_generator import PacketGenerator
 
 
@@ -160,7 +160,17 @@ def validate_dataset(args):
         print(f"\nValidating personalization dataset: {args.user_dir}")
 
         try:
-            dataset = PersonalizationDataset(user_dir=args.user_dir)
+            # Check format and use appropriate dataset
+            user_path = Path(args.user_dir)
+            manifest_path = user_path / 'manifest.json'
+
+            if manifest_path.exists():
+                print("  Format: manifest.json (new format)")
+                dataset = ManifestDataset(data_dir=args.user_dir)
+            else:
+                print("  Format: lines/ + ground_truth.json (old format - deprecated)")
+                dataset = PersonalizationDataset(user_dir=args.user_dir)
+
             print(f"  Total samples: {len(dataset)}")
 
             # Show samples
