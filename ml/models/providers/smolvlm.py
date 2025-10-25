@@ -329,46 +329,122 @@ class SmolVLMModel(BaseVisionLanguageModel):
         self.processor.save_pretrained(output_dir)
         print("✓ Adapter saved")
 
-    def load_adapter(self, adapter_path: str) -> None:
+    def load_adapter(
+        self,
+        adapter_path: str,
+        adapter_name: str = "default",
+        is_trainable: bool = True
+    ) -> None:
         """
         Load a LoRA adapter from disk.
 
-        Supports both single adapters and stacked adapters (bootstrap + personalization).
-        If the path contains both 'bootstrap/' and 'personalization/' subdirectories,
-        it will load both as a stacked adapter configuration.
+        Args:
+            adapter_path: Path to adapter weights
+            adapter_name: Name for the adapter (enables multi-adapter composition)
+            is_trainable: Whether adapter should be trainable
         """
         adapter_path = Path(adapter_path)
 
-        # Check if this is a stacked adapter (bootstrap + personalization)
-        bootstrap_dir = adapter_path / 'bootstrap'
-        personalization_dir = adapter_path / 'personalization'
+        print(f"Loading LoRA adapter '{adapter_name}' from {adapter_path}...")
+        self.model.load_adapter(str(adapter_path), adapter_name=adapter_name)
 
-        if bootstrap_dir.exists() and personalization_dir.exists():
-            print(f"Loading stacked adapters from {adapter_path}...")
-            print("  - Loading bootstrap adapter (frozen)...")
-            self.model = PeftModel.from_pretrained(
-                self.base_model,
-                str(bootstrap_dir),
-                adapter_name="bootstrap"
-            )
-
-            print("  - Loading personalization adapter...")
-            self.model.load_adapter(str(personalization_dir), adapter_name="personalization")
-
-            # Set personalization as the active adapter for inference
-            # Both adapters will be used (bootstrap is merged into base, personalization adds on top)
-            self.model.set_adapter("personalization")
-            print("✓ Stacked adapters loaded (bootstrap + personalization)")
-            print(f"  Available adapters: {list(self.model.peft_config.keys())}")
-            print(f"  Active adapter: personalization")
+        # Set trainability
+        if not is_trainable:
+            for name, param in self.model.named_parameters():
+                if adapter_name in name:
+                    param.requires_grad = False
+            print(f"✓ Adapter '{adapter_name}' loaded and frozen")
         else:
-            # Single adapter
-            print(f"Loading single adapter from {adapter_path}...")
-            self.model = PeftModel.from_pretrained(
-                self.base_model,
-                str(adapter_path)
-            )
-            print("✓ Adapter loaded")
+            print(f"✓ Adapter '{adapter_name}' loaded (trainable)")
+
+    def set_adapter(self, adapter_names: list) -> None:
+        """
+        Set active adapters for inference/training.
+
+        Args:
+            adapter_names: List of adapter names to activate (e.g., ["bootstrap", "user"])
+        """
+        self.model.set_adapter(adapter_names)
+        print(f"✓ Active adapters: {adapter_names}")
+
+    def get_adapter_state_dict(self, adapter_name: str = "default") -> dict:
+        """
+        Get state dict for a specific adapter.
+
+        Args:
+            adapter_name: Name of the adapter
+
+        Returns:
+            Adapter state dict
+        """
+        state_dict = {}
+        for name, param in self.model.named_parameters():
+            if adapter_name in name:
+                state_dict[name] = param
+        return state_dict
+
+    def prepare_training_batch(self, images: list, texts: list) -> dict:
+        """
+        Prepare batch for training with SmolVLM chat format.
+
+        Args:
+            images: List of PIL Images
+            texts: List of ground truth texts
+
+        Returns:
+            Processed batch ready for forward pass
+        """
+        # Build chat messages for each sample
+        messages_batch = []
+        for text in texts:
+            messages_batch.append([
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image"},
+                        {"type": "text", "text": "Transcribe this handwritten text."}
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": text}
+                    ]
+                }
+            ])
+
+        # Apply chat template
+        texts_formatted = [
+            self.processor.apply_chat_template(msg, tokenize=False, add_generation_prompt=False)
+            for msg in messages_batch
+        ]
+
+        # Process through processor
+        inputs = self.processor(
+            text=texts_formatted,
+            images=images,
+            return_tensors="pt",
+            padding=True,
+            truncation=False
+        )
+
+        # Handle long sequences
+        max_seq_len = 1024
+        if inputs['input_ids'].shape[1] > max_seq_len:
+            inputs['input_ids'] = inputs['input_ids'][:, :max_seq_len]
+            inputs['attention_mask'] = inputs['attention_mask'][:, :max_seq_len]
+
+        # Create labels
+        labels = inputs['input_ids'].clone()
+        labels[labels == self.tokenizer.pad_token_id] = -100
+
+        return {
+            'pixel_values': inputs['pixel_values'],
+            'image_grid_thw': inputs.get('image_grid_thw'),
+            'input_ids': inputs['input_ids'],
+            'attention_mask': inputs['attention_mask'],
+            'labels': labels
+        }
 
     def get_trainable_parameters(self) -> int:
         """Get count of trainable parameters."""

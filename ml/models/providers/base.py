@@ -76,6 +76,31 @@ class BaseVisionLanguageModel(nn.Module, ABC):
         pass
 
     @abstractmethod
+    def prepare_training_batch(
+        self,
+        images: List[Any],
+        texts: List[str]
+    ) -> Dict[str, Any]:
+        """
+        Prepare a batch of images and texts for training.
+
+        Each model handles its own preprocessing (chat templates, prompts, etc.).
+
+        Args:
+            images: List of PIL Images
+            texts: List of ground truth texts
+
+        Returns:
+            Dictionary with processed inputs ready for forward pass:
+            - pixel_values: Processed image tensors
+            - input_ids: Token IDs
+            - attention_mask: Attention mask
+            - labels: Training labels
+            - image_grid_thw: (optional) Image grid dimensions for some models
+        """
+        pass
+
+    @abstractmethod
     def save_adapter(self, output_dir: str) -> None:
         """
         Save model adapter/weights.
@@ -86,12 +111,42 @@ class BaseVisionLanguageModel(nn.Module, ABC):
         pass
 
     @abstractmethod
-    def load_adapter(self, adapter_path: str) -> None:
+    def load_adapter(
+        self,
+        adapter_path: str,
+        adapter_name: str = "default",
+        is_trainable: bool = True
+    ) -> None:
         """
         Load model adapter/weights.
 
         Args:
             adapter_path: Path to adapter
+            adapter_name: Name to assign to the adapter (for multi-adapter composition)
+            is_trainable: Whether adapter parameters should be trainable
+        """
+        pass
+
+    @abstractmethod
+    def set_adapter(self, adapter_names: List[str]) -> None:
+        """
+        Set active adapters for inference/training.
+
+        Args:
+            adapter_names: List of adapter names to activate
+        """
+        pass
+
+    @abstractmethod
+    def get_adapter_state_dict(self, adapter_name: str = "default") -> Dict[str, Any]:
+        """
+        Get state dict for a specific adapter.
+
+        Args:
+            adapter_name: Name of the adapter
+
+        Returns:
+            Adapter state dict
         """
         pass
 

@@ -10,6 +10,8 @@ from torch.utils.data import Dataset
 from PIL import Image
 import numpy as np
 
+from ml.data.augmentation import HandwritingAugmentation, MinimalAugmentation
+
 
 class IAMDataset(Dataset):
     """
@@ -20,17 +22,24 @@ class IAMDataset(Dataset):
         data_dir: Root directory containing processed IAM data
         split: One of 'train', 'val', 'test'
         transform: Optional image transforms
+        sample_ratio: Fraction of dataset to use (0.0-1.0). Default 1.0 uses all data.
+                     Useful for faster iteration during development.
     """
 
     def __init__(
         self,
         data_dir: str,
         split: str = 'train',
-        transform=None
+        transform=None,
+        sample_ratio: float = 1.0
     ):
         self.data_dir = Path(data_dir)
         self.split = split
         self.transform = transform
+        self.sample_ratio = sample_ratio
+
+        if not (0.0 < sample_ratio <= 1.0):
+            raise ValueError(f"sample_ratio must be in (0, 1], got {sample_ratio}")
 
         # Load line image paths and ground truth
         self.samples = self._load_samples()
@@ -57,6 +66,16 @@ class IAMDataset(Dataset):
                         'text': text,
                         'line_id': line_id
                     })
+
+        # Apply sampling if requested
+        if self.sample_ratio < 1.0:
+            original_count = len(samples)
+            # Use numpy for reproducible random sampling
+            np.random.seed(42)  # Fixed seed for reproducibility
+            n_samples = int(len(samples) * self.sample_ratio)
+            indices = np.random.choice(len(samples), size=n_samples, replace=False)
+            samples = [samples[i] for i in sorted(indices)]
+            print(f"Downsampled {self.split} set: {original_count} -> {len(samples)} samples ({self.sample_ratio*100:.0f}%)")
 
         return samples
 
@@ -212,6 +231,9 @@ class ManifestDataset(Dataset):
         transform: Optional image transforms
         split: Optional train/val split ratio (e.g., 0.8 = 80% train, 20% val)
         split_type: 'train' or 'val' when using split
+        augment: Enable handwriting-specific augmentation (for few-shot training)
+        augment_strength: Augmentation intensity 0.0-1.0 (default: 0.7)
+        augment_prob: Probability of applying each augmentation (default: 0.5)
     """
 
     def __init__(
@@ -219,12 +241,31 @@ class ManifestDataset(Dataset):
         data_dir: str,
         transform=None,
         split: Optional[float] = None,
-        split_type: Optional[str] = None
+        split_type: Optional[str] = None,
+        augment: bool = False,
+        augment_strength: float = 0.7,
+        augment_prob: float = 0.5
     ):
         self.data_dir = Path(data_dir)
         self.transform = transform
         self.split = split
         self.split_type = split_type
+        self.augment = augment
+
+        # Setup augmentation pipeline
+        if augment:
+            # Use minimal augmentation for very few samples (< 10)
+            # Heavy augmentation for 10+ samples
+            if split_type == 'train':
+                self.augmenter = HandwritingAugmentation(
+                    strength=augment_strength,
+                    prob=augment_prob
+                )
+            else:
+                # No augmentation for validation
+                self.augmenter = None
+        else:
+            self.augmenter = None
 
         # Load samples from manifest
         self.samples = self._load_samples()
@@ -281,6 +322,11 @@ class ManifestDataset(Dataset):
         # Load image
         image = Image.open(sample['image_path']).convert('RGB')
 
+        # Apply augmentation first (if enabled)
+        if self.augmenter is not None:
+            image = self.augmenter(image)
+
+        # Apply user-provided transforms (if any)
         if self.transform:
             image = self.transform(image)
 

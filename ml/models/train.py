@@ -30,11 +30,11 @@ from tqdm import tqdm
 from pathlib import Path
 from typing import Optional, Dict, List
 import numpy as np
-from jiwer import cer, wer
 from alveslib import get_logger
 
 from ml.models.providers import create_model, MODEL_REGISTRY, BaseVisionLanguageModel
 from ml.data.datasets import IAMDataset, PersonalizationDataset, ManifestDataset
+from ml.models.eval import model_agnostic_loss
 
 
 logger = get_logger("ml-trainloop")
@@ -77,7 +77,12 @@ class DisgraPhiTrainer:
         log_every: int = 10,
         save_every: int = 500,
         eval_every: int = 50,
-        max_grad_norm: float = 1.0
+        max_grad_norm: float = 1.0,
+        # Hierarchical PEFT parameters
+        hierarchical_mode: bool = False,
+        kl_weight: float = 0.5,
+        l2sp_weight: float = 1e-4,
+        base_model_for_kl: Optional[BaseVisionLanguageModel] = None
     ):
         self.model = model
         self.experiment_name = experiment_name
@@ -96,6 +101,19 @@ class DisgraPhiTrainer:
         self.save_every = save_every
         self.eval_every = eval_every
         self.max_grad_norm = max_grad_norm
+
+        # Hierarchical PEFT settings
+        self.hierarchical_mode = hierarchical_mode
+        self.kl_weight = kl_weight
+        self.l2sp_weight = l2sp_weight
+        self.base_model_for_kl = base_model_for_kl  # Model with only bootstrap adapter (no user adapter)
+
+        if hierarchical_mode:
+            logger.info("=== Hierarchical PEFT Mode Enabled ===")
+            logger.info(f"  KL divergence weight: {kl_weight}")
+            logger.info(f"  L2-SP weight: {l2sp_weight}")
+            if base_model_for_kl is None:
+                logger.warning("No base model provided for KL divergence - KL loss will be skipped")
 
         # Setup dataloaders
         self.train_loader = DataLoader(
@@ -143,7 +161,7 @@ class DisgraPhiTrainer:
         self.global_step = 0
         self.epoch = 0
         self.best_val_loss = float('inf')
-        self.best_val_cer = float('inf')
+        self.best_hybrid_loss = float('inf')
 
         logger.info(f"Trainer initialized")
         logger.info(f"  Training samples: {len(train_dataset)}")
@@ -158,78 +176,13 @@ class DisgraPhiTrainer:
         """
         Collate function for batching.
 
-        Processes images and text through the model's processor.
-        Supports different model architectures:
-        - Chat-based: Qwen3-VL, SmolVLM (use chat templates)
-        - Prompt-based: Florence-2 (use task prompts)
+        Returns raw images and texts - let the model provider handle preprocessing.
         """
         images = [item['image'] for item in batch]
         texts = [item['text'] for item in batch]
 
-        # Detect model type by checking if processor has a valid chat template
-        # Florence-2 has the method but raises an error, so we check the attribute directly
-        has_chat_template = (
-            hasattr(self.model.processor, 'apply_chat_template') and
-            hasattr(self.model.processor, 'chat_template') and
-            self.model.processor.chat_template is not None
-        )
-
-        if has_chat_template:
-            # Chat-based models (Qwen, SmolVLM)
-            messages_batch = []
-            for text in texts:
-                messages_batch.append([
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "image"},
-                            {"type": "text", "text": "Transcribe this handwritten text."}
-                        ]
-                    },
-                    {
-                        "role": "assistant",
-                        "content": [
-                            {"type": "text", "text": text}
-                        ]
-                    }
-                ])
-
-            texts_formatted = [
-                self.model.processor.apply_chat_template(msg, tokenize=False, add_generation_prompt=False) if self.model.processor is not None else None
-                for msg in messages_batch
-            ]
-        else: # TODO: If adding new model make this elsif
-            # Prompt-based models (Florence-2)
-            # Florence-2 format: <TASK_PROMPT>text</s>
-            # For OCR task, we use <OCR> prompt
-            texts_formatted = [f"<OCR>" for text in texts]
-
-        # Process without truncation to preserve image tokens
-        inputs = self.model.processor(
-            text=texts_formatted,
-            images=images,
-            return_tensors="pt",
-            padding=True,
-            truncation=False
-        )
-
-        # Handle long sequences
-        max_seq_len = 1024  # Increase from 512 to accommodate image tokens
-        if inputs['input_ids'].shape[1] > max_seq_len:
-            inputs['input_ids'] = inputs['input_ids'][:, :max_seq_len]
-            inputs['attention_mask'] = inputs['attention_mask'][:, :max_seq_len]
-
-        # Create labels (shift input_ids by 1 for causal LM)
-        labels = inputs['input_ids'].clone()
-        labels[labels == self.model.tokenizer.pad_token_id] = -100
-
-        return {
-            'pixel_values': inputs['pixel_values'],
-            'image_grid_thw': inputs.get('image_grid_thw'),  # Required by Qwen2-VL, optional for others
-            'input_ids': inputs['input_ids'],
-            'attention_mask': inputs['attention_mask'],
-            'labels': labels
-        }
+        # Delegate preprocessing to model
+        return self.model.prepare_training_batch(images, texts)
 
     def _compute_gradient_norm(self) -> float:
         """Compute the global gradient norm across all parameters."""
@@ -254,6 +207,70 @@ class DisgraPhiTrainer:
     def _compute_perplexity(self, loss: float) -> float:
         """Compute perplexity from cross-entropy loss."""
         return torch.exp(torch.tensor(loss)).item()
+
+    def _compute_l2sp_loss(self) -> torch.Tensor:
+        """
+        Compute L2-SP regularization loss.
+
+        Regularizes user adapter weights toward zero (or global adapter).
+        Only applies to trainable parameters.
+        """
+        l2sp_loss = 0.0
+        num_params = 0
+
+        for name, param in self.model.named_parameters():
+            # Only regularize trainable user adapter parameters
+            # Skip bootstrap adapter (frozen) and base model
+            if param.requires_grad and 'lora' in name.lower():
+                l2sp_loss += torch.sum(param ** 2)
+                num_params += 1
+
+        if num_params > 0:
+            l2sp_loss = l2sp_loss / num_params
+
+        return l2sp_loss
+
+    def _compute_kl_divergence_loss(
+        self,
+        batch: Dict[str, torch.Tensor],
+        user_logits: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Compute KL divergence between base model (bootstrap only) and user model.
+
+        This regularizes the user adapter to stay close to the bootstrap model,
+        preventing overfitting on few samples.
+
+        Args:
+            batch: Input batch
+            user_logits: Logits from model with both bootstrap + user adapters
+
+        Returns:
+            KL divergence loss
+        """
+        if self.base_model_for_kl is None:
+            return torch.tensor(0.0, device=user_logits.device)
+
+        # Get base model predictions (bootstrap only, no user adapter)
+        with torch.no_grad():
+            base_outputs = self.base_model_for_kl(
+                pixel_values=batch['pixel_values'],
+                image_grid_thw=batch.get('image_grid_thw'),
+                input_ids=batch['input_ids'],
+                attention_mask=batch['attention_mask'],
+                labels=None  # No loss computation
+            )
+            base_logits = base_outputs['logits']
+
+        # Compute KL divergence: KL(P_base || P_user)
+        # P_base is the teacher (bootstrap), P_user is the student (bootstrap + user)
+        kl_loss = nn.functional.kl_div(
+            nn.functional.log_softmax(user_logits, dim=-1),
+            nn.functional.softmax(base_logits, dim=-1),
+            reduction='batchmean'
+        )
+
+        return kl_loss
 
     def _generate_sample_predictions(
         self,
@@ -306,13 +323,17 @@ class DisgraPhiTrainer:
 
         return samples
 
-    def _compute_cer_wer(
+    def _compute_hybrid_ocr_loss(
         self,
         predictions: List[str],
         ground_truths: List[str]
     ) -> Dict[str, float]:
-        """Compute Character Error Rate and Word Error Rate."""
-        logger.info(f"Computing CER/WER for {len(predictions)} predictions")
+        """
+        Compute hybrid OCR loss combining CER, WER, and NED.
+
+        Returns average hybrid loss across all samples, plus individual metrics.
+        """
+        logger.info(f"Computing hybrid OCR metrics for {len(predictions)} predictions")
 
         # Filter out empty strings
         valid_pairs = [
@@ -326,27 +347,30 @@ class DisgraPhiTrainer:
             logger.warning("No valid prediction pairs found! All predictions or ground truths are empty.")
             logger.warning(f"Sample predictions: {predictions[:3]}")
             logger.warning(f"Sample ground truths: {ground_truths[:3]}")
-            return {'cer': None, 'wer': None}  # Return None to indicate failure, not 0
+            return {'hybrid_loss': None}
 
-        # Unzip into lists (not tuples) - jiwer expects list of strings
-        preds, gts = zip(*valid_pairs)
-        preds = list(preds)
-        gts = list(gts)
+        # Compute hybrid loss for each pair
+        hybrid_losses = []
+        for pred, gt in valid_pairs:
+            try:
+                loss = model_agnostic_loss(gt, pred)
+                hybrid_losses.append(loss)
+            except Exception as e:
+                logger.warning(f"Failed to compute loss for pair: {e}")
+                continue
 
-        try:
-            cer_score = cer(gts, preds) * 100  # Convert to percentage
-            wer_score = wer(gts, preds) * 100
-            logger.info(f"CER: {cer_score:.2f}%, WER: {wer_score:.2f}%")
-        except Exception as e:
-            logger.error(f"Error computing CER/WER: {e}")
-            logger.error(f"Sample preds: {preds[:3]}")
-            logger.error(f"Sample gts: {gts[:3]}")
-            cer_score = None
-            wer_score = None
+        if not hybrid_losses:
+            logger.error("Failed to compute any hybrid losses")
+            return {'hybrid_loss': None}
+
+        # Average across all samples
+        avg_hybrid_loss = np.mean(hybrid_losses)
+
+        logger.info(f"Hybrid OCR Loss: {avg_hybrid_loss:.4f} (lower is better)")
 
         return {
-            'cer': cer_score,
-            'wer': wer_score
+            'hybrid_loss': avg_hybrid_loss,
+            'num_samples': len(hybrid_losses)
         }
 
     def train_epoch(self):
@@ -373,7 +397,32 @@ class DisgraPhiTrainer:
                 labels=batch['labels']
             )
 
-            loss = outputs['loss'] / self.gradient_accumulation_steps
+            # Base task loss (cross-entropy)
+            task_loss = outputs['loss']
+
+            # Hierarchical PEFT: Add KL divergence and L2-SP regularization
+            if self.hierarchical_mode:
+                # KL divergence to base model (bootstrap only)
+                kl_loss = self._compute_kl_divergence_loss(batch, outputs['logits'])
+
+                # L2-SP regularization (user adapter weights)
+                l2sp_loss = self._compute_l2sp_loss()
+
+                # Total loss
+                loss = task_loss + self.kl_weight * kl_loss + self.l2sp_weight * l2sp_loss
+
+                # Store components for logging
+                task_loss_value = task_loss.item()
+                kl_loss_value = kl_loss.item()
+                l2sp_loss_value = l2sp_loss.item()
+            else:
+                loss = task_loss
+                task_loss_value = task_loss.item()
+                kl_loss_value = 0.0
+                l2sp_loss_value = 0.0
+
+            # Scale for gradient accumulation
+            loss = loss / self.gradient_accumulation_steps
 
             # Backward pass
             loss.backward()
@@ -410,6 +459,12 @@ class DisgraPhiTrainer:
                     self.writer.add_scalar('train/learning_rate', lr, self.global_step)
                     self.writer.add_scalar('train/perplexity', perplexity, self.global_step)
                     self.writer.add_scalar('train/grad_norm', grad_norm, self.global_step)
+
+                    # Log hierarchical PEFT metrics
+                    if self.hierarchical_mode:
+                        self.writer.add_scalar('train/task_loss', task_loss_value, self.global_step)
+                        self.writer.add_scalar('train/kl_loss', kl_loss_value, self.global_step)
+                        self.writer.add_scalar('train/l2sp_loss', l2sp_loss_value, self.global_step)
 
                     # Log parameter statistics (every 100 steps to reduce overhead)
                     if self.global_step % 100 == 0:
@@ -479,7 +534,7 @@ class DisgraPhiTrainer:
         logger.info("Generating sample predictions...")
         sample_predictions = self._generate_sample_predictions(num_samples=5)
 
-        # Compute CER/WER on samples
+        # Compute hybrid OCR loss on samples
         if sample_predictions:
             logger.info(f"Generated {len(sample_predictions)} sample predictions")
             predictions = [s['prediction'] for s in sample_predictions]
@@ -490,7 +545,7 @@ class DisgraPhiTrainer:
                 logger.info(f"Sample 1 GT: {ground_truths[0][:50]}...")
                 logger.info(f"Sample 1 Pred: {predictions[0][:50]}...")
 
-            error_metrics = self._compute_cer_wer(predictions, ground_truths)
+            ocr_metrics = self._compute_hybrid_ocr_loss(predictions, ground_truths)
 
             # Log sample predictions as text
             samples_text = "\n\n".join([
@@ -501,16 +556,14 @@ class DisgraPhiTrainer:
             ])
             self.writer.add_text('val/sample_predictions', samples_text, self.global_step)
 
-            # Log error metrics (only if not None)
-            if error_metrics['cer'] is not None:
-                self.writer.add_scalar('val/cer', error_metrics['cer'], self.global_step)
-                self.writer.add_scalar('val/wer', error_metrics['wer'], self.global_step)
-                logger.info(f"Validation CER: {error_metrics['cer']:.2f}%")
-                logger.info(f"Validation WER: {error_metrics['wer']:.2f}%")
+            # Log hybrid OCR loss (only if not None)
+            if ocr_metrics['hybrid_loss'] is not None:
+                self.writer.add_scalar('val/hybrid_ocr_loss', ocr_metrics['hybrid_loss'], self.global_step)
+                logger.info(f"Validation Hybrid OCR Loss: {ocr_metrics['hybrid_loss']:.4f}")
             else:
-                logger.error("Failed to compute CER/WER - predictions may be empty")
+                logger.error("Failed to compute hybrid OCR loss - predictions may be empty")
         else:
-            error_metrics = {'cer': None, 'wer': None}
+            ocr_metrics = {'hybrid_loss': None}
             logger.error("No sample predictions generated - check model.generate() method")
 
         # Log basic metrics
@@ -520,11 +573,11 @@ class DisgraPhiTrainer:
         logger.info(f"Validation Loss: {avg_val_loss:.4f}")
         logger.info(f"Validation Perplexity: {val_perplexity:.2f}")
 
-        # Save best model based on CER (if available) or loss
-        if error_metrics['cer'] is not None and error_metrics['cer'] < self.best_val_cer:
-            self.best_val_cer = error_metrics['cer']
-            self.save_checkpoint('best_model_cer')
-            logger.info(f"New best model saved (val_cer: {error_metrics['cer']:.2f}%)")
+        # Save best model based on hybrid OCR loss (if available) or validation loss
+        if ocr_metrics['hybrid_loss'] is not None and ocr_metrics['hybrid_loss'] < self.best_hybrid_loss:
+            self.best_hybrid_loss = ocr_metrics['hybrid_loss']
+            self.save_checkpoint('best_model_hybrid')
+            logger.info(f"New best model saved (hybrid_loss: {ocr_metrics['hybrid_loss']:.4f})")
 
         if avg_val_loss < self.best_val_loss:
             self.best_val_loss = avg_val_loss
@@ -589,133 +642,137 @@ class DisgraPhiTrainer:
 def main():
     """CLI for training."""
     parser = argparse.ArgumentParser(
-        description="Train DisgraPhi vision-language models (unified)"
+        description="Train DisgraPhi vision-language models",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Bootstrap training on IAM dataset
+  python train.py --mode bootstrap --model smolvlm-256m --experiment-name iam-base
+
+  # Few-shot personalization (5-20 samples)
+  python train.py --mode personalize --model smolvlm-256m \\
+    --experiment-name user-john --user-dir data/john \\
+    --bootstrap ml/checkpoints/bootstrap/best_model_cer \\
+    --user-rank 2 --augment --kl 0.5
+
+  # Full personalization (50+ samples)
+  python train.py --mode personalize --model smolvlm-256m \\
+    --user-dir data/john --bootstrap ml/checkpoints/bootstrap/best_model_cer \\
+    --user-rank 4 --augment --kl 0.3 --epochs 10
+        """
     )
 
-    # Model selection
-    parser.add_argument(
-        '--model-type',
-        type=str,
-        choices=list(MODEL_REGISTRY.keys()),
-        required=True,
-        help='Model type to train (e.g., qwen3-vl-4b, smolvlm-256m)'
-    )
+    # === Core Settings ===
+    parser.add_argument('--mode', type=str, required=True, choices=['bootstrap', 'personalize'],
+                        help='bootstrap: train on IAM dataset | personalize: user-specific fine-tuning')
+    parser.add_argument('--model', dest='model_type', type=str, required=True,
+                        choices=list(MODEL_REGISTRY.keys()),
+                        help='Model architecture')
+    parser.add_argument('--experiment-name', type=str, default='default',
+                        help='Name for experiment tracking (tensorboard)')
+    parser.add_argument('--output-dir', type=str, default='ml/checkpoints',
+                        help='Base output directory (mode/experiment-name will be appended)')
 
-    # Training mode
-    parser.add_argument(
-        '--mode',
-        type=str,
-        choices=['bootstrap', 'personalize'],
-        default='bootstrap',
-        help='Training mode: bootstrap (IAM) or personalize (user-specific)'
-    )
+    # === Data ===
+    data_group = parser.add_argument_group('data')
+    data_group.add_argument('--data-dir', type=str, default='ml/data/raw/iam/processed',
+                           help='IAM dataset path (bootstrap mode)')
+    data_group.add_argument('--sample-ratio', type=float, default=1.0,
+                           help='Fraction of IAM dataset to use (0-1, default: 1.0). Use 0.5 for 50%% sampling')
+    data_group.add_argument('--user-dir', type=str,
+                           help='User data directory with manifest.json (personalize mode, required)')
+    data_group.add_argument('--augment', action='store_true',
+                           help='Enable handwriting augmentation (recommended for personalize)')
+    data_group.add_argument('--augment-strength', type=float, default=0.7,
+                           help='Augmentation intensity 0-1 (default: 0.7)')
 
-    # Data paths
-    parser.add_argument(
-        '--data-dir',
-        type=str,
-        default='ml/data/raw/iam/processed',
-        help='Path to processed IAM data (for bootstrap mode)'
-    )
-    parser.add_argument(
-        '--user-dir',
-        type=str,
-        help='Path to user data directory (for personalize mode)'
-    )
-    parser.add_argument(
-        '--bootstrap-adapter',
-        type=str,
-        help='Path to bootstrap adapter (for personalize mode)'
-    )
+    # === Model Architecture ===
+    model_group = parser.add_argument_group('model architecture')
+    model_group.add_argument('--lora-r', type=int, default=8,
+                            help='LoRA rank for bootstrap (default: 8)')
+    model_group.add_argument('--user-rank', type=int, default=2,
+                            help='LoRA rank for user adapter in personalize mode (default: 2)')
+    model_group.add_argument('--quant', type=str, choices=['4bit', '8bit', 'none'], default='4bit',
+                            help='Quantization mode (default: 4bit)')
 
-    # Model config
-    parser.add_argument(
-        '--lora-r',
-        type=int,
-        default=8,
-        help='LoRA rank'
-    )
-    parser.add_argument(
-        '--lora-alpha',
-        type=int,
-        default=16,
-        help='LoRA alpha'
-    )
-    parser.add_argument(
-        '--load-in-4bit',
-        action='store_true',
-        help='Enable 4-bit quantization'
-    )
-    parser.add_argument(
-        '--load-in-8bit',
-        action='store_true',
-        help='Enable 8-bit quantization'
-    )
+    # === Personalization (hierarchical PEFT) ===
+    hier_group = parser.add_argument_group('personalization')
+    hier_group.add_argument('--bootstrap', dest='bootstrap_adapter', type=str,
+                           help='Path to bootstrap adapter checkpoint (personalize mode, required)')
+    hier_group.add_argument('--kl', dest='kl_weight', type=float, default=0.5,
+                           help='KL divergence weight for hierarchical training (default: 0.5)')
+    hier_group.add_argument('--l2sp', dest='l2sp_weight', type=float, default=1e-4,
+                           help='L2-SP regularization weight (default: 1e-4)')
 
-    # Training config
-    parser.add_argument(
-        '--output-dir',
-        type=str,
-        required=True,
-        help='Output directory for checkpoints and logs'
-    )
-    parser.add_argument(
-        '--experiment-name',
-        type=str,
-        default='default',
-        help='Experiment name for tensorboard logging'
-    )
-    parser.add_argument(
-        '--learning-rate',
-        type=float,
-        default=1e-5,
-        help='Learning rate'
-    )
-    parser.add_argument(
-        '--batch-size',
-        type=int,
-        default=2,
-        help='Batch size per device'
-    )
-    parser.add_argument(
-        '--gradient-accumulation-steps',
-        type=int,
-        default=4,
-        help='Gradient accumulation steps'
-    )
-    parser.add_argument(
-        '--num-epochs',
-        type=int,
-        default=3,
-        help='Number of training epochs'
-    )
-    parser.add_argument(
-        '--warmup-steps',
-        type=int,
-        default=0,
-        help='Number of warmup steps (0 = auto: 30%% of total steps)'
-    )
-    parser.add_argument(
-        '--eval-every',
-        type=int,
-        default=100,
-        help='Evaluate every N steps'
-    )
-    parser.add_argument(
-        '--save-every',
-        type=int,
-        default=500,
-        help='Save checkpoint every N steps'
-    )
+    # === Training Hyperparameters ===
+    train_group = parser.add_argument_group('training')
+    train_group.add_argument('--lr', dest='learning_rate', type=float, default=None,
+                            help='Learning rate (default: 1e-5 for bootstrap, 5e-4 for personalize)')
+    train_group.add_argument('--batch-size', type=int, default=2,
+                            help='Batch size per device (default: 2)')
+    train_group.add_argument('--grad-accum', dest='gradient_accumulation_steps', type=int, default=4,
+                            help='Gradient accumulation steps (default: 4)')
+    train_group.add_argument('--epochs', dest='num_epochs', type=int, default=None,
+                            help='Training epochs (default: 3 for bootstrap, auto for personalize)')
+    train_group.add_argument('--eval-every', type=int, default=100,
+                            help='Evaluation interval in steps (default: 100)')
+    train_group.add_argument('--save-every', type=int, default=500,
+                            help='Checkpoint save interval in steps (default: 500)')
 
     args = parser.parse_args()
 
-    # Validate arguments
-    if args.mode == 'personalize':
+    # === Smart Defaults Based on Mode ===
+    if args.mode == 'bootstrap':
+        args.learning_rate = args.learning_rate or 1e-5
+        args.num_epochs = args.num_epochs or 3
+        args.lora_alpha = args.lora_r * 2  # Standard scaling
+        hierarchical_mode = False
+    else:  # personalize
         if not args.user_dir:
-            parser.error("--user-dir required for personalize mode")
+            parser.error("--user-dir is required for personalize mode")
         if not args.bootstrap_adapter:
-            parser.error("--bootstrap-adapter required for personalize mode")
+            parser.error("--bootstrap is required for personalize mode")
+
+        args.learning_rate = args.learning_rate or 5e-4
+        # Auto-set epochs based on dataset size if not specified
+        if args.num_epochs is None:
+            from pathlib import Path
+            import json
+            manifest_path = Path(args.user_dir) / 'manifest.json'
+            if manifest_path.exists():
+                with open(manifest_path) as f:
+                    n_samples = json.load(f).get('totalSamples', 20)
+                # More epochs for fewer samples
+                args.num_epochs = max(10, min(100, 200 // n_samples))
+            else:
+                args.num_epochs = 20
+
+        args.lora_r = args.user_rank  # Use user-rank for personalization
+        args.lora_alpha = args.lora_r * 2
+        hierarchical_mode = True
+
+    # Quantization flags
+    args.load_in_4bit = (args.quant == '4bit')
+    args.load_in_8bit = (args.quant == '8bit')
+
+    # Build full output path
+    args.output_dir = f"{args.output_dir}/{args.mode}_{args.model_type}/{args.experiment_name}"
+
+    # Print configuration summary
+    logger.info("=" * 60)
+    logger.info(f"Mode: {args.mode}")
+    logger.info(f"Model: {args.model_type}")
+    logger.info(f"Experiment: {args.experiment_name}")
+    logger.info(f"Output: {args.output_dir}")
+    if args.mode == 'personalize':
+        logger.info(f"Bootstrap: {args.bootstrap_adapter}")
+        logger.info(f"User data: {args.user_dir}")
+        logger.info(f"User LoRA rank: {args.user_rank}")
+        logger.info(f"Augmentation: {'enabled' if args.augment else 'disabled'}")
+        logger.info(f"KL weight: {args.kl_weight}")
+    logger.info(f"Learning rate: {args.learning_rate}")
+    logger.info(f"Epochs: {args.num_epochs}")
+    logger.info("=" * 60)
 
     # Create model using unified provider system
     logger.info(f"Creating model: {args.model_type}")
@@ -728,66 +785,76 @@ def main():
         bootstrap_adapter_path=args.bootstrap_adapter if args.mode == 'personalize' else None
     )
 
+    # For hierarchical mode, create base model (bootstrap only) for KL divergence
+    base_model_for_kl = None
+    if hierarchical_mode:
+        logger.info("Creating base model for KL divergence...")
+        base_model_for_kl = create_model(
+            model_type=args.model_type,
+            lora_r=8,  # Use bootstrap rank
+            lora_alpha=16,
+            load_in_4bit=args.load_in_4bit,
+            load_in_8bit=args.load_in_8bit,
+            bootstrap_adapter_path=args.bootstrap_adapter
+        )
+        base_model_for_kl.eval()  # Freeze for KL computation
+
     # Load datasets
     if args.mode == 'bootstrap':
         logger.info("Loading IAM datasets...")
+        if args.sample_ratio < 1.0:
+            logger.info(f"Using {args.sample_ratio*100:.0f}% of IAM dataset for faster iteration")
         train_dataset = IAMDataset(
             data_dir=args.data_dir,
-            split='train'
+            split='train',
+            sample_ratio=args.sample_ratio
         )
         val_dataset = IAMDataset(
             data_dir=args.data_dir,
-            split='val'
+            split='val',
+            sample_ratio=args.sample_ratio
         )
     else:  # personalize
         logger.info(f"Loading user dataset from {args.user_dir}...")
-
-        # Check if using new manifest format
-        from pathlib import Path
         manifest_path = Path(args.user_dir) / 'manifest.json'
 
         if manifest_path.exists():
-            # Use ManifestDataset with built-in split support
-            logger.info("Using ManifestDataset (new format)")
+            logger.info("Using ManifestDataset")
             train_dataset = ManifestDataset(
                 data_dir=args.user_dir,
                 split=0.8,
-                split_type='train'
+                split_type='train',
+                augment=args.augment,
+                augment_strength=args.augment_strength
             )
             val_dataset = ManifestDataset(
                 data_dir=args.user_dir,
                 split=0.8,
-                split_type='val'
+                split_type='val',
+                augment=False  # No augmentation on validation
             )
         else:
-            # Fallback to PersonalizationDataset for old format TODO: delte
-            logger.info("Using PersonalizationDataset (old format - deprecated)")
-            full_dataset = PersonalizationDataset(user_dir=args.user_dir)
-
-            # Split into train/val (80/20)
-            train_size = int(0.8 * len(full_dataset))
-            val_size = len(full_dataset) - train_size
-
-            train_dataset, val_dataset = torch.utils.data.random_split(
-                full_dataset,
-                [train_size, val_size]
-            )
+            logger.error("manifest.json not found - use new dataset format")
+            return
 
     # Create trainer
-    experiment_name = args.experiment_name or f"{args.model_type}_{args.mode}"
     trainer = DisgraPhiTrainer(
         model=model,
         train_dataset=train_dataset,
         val_dataset=val_dataset,
         output_dir=args.output_dir,
-        experiment_name=experiment_name,
+        experiment_name=args.experiment_name,
         learning_rate=args.learning_rate,
         batch_size=args.batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         num_epochs=args.num_epochs,
-        warmup_steps=args.warmup_steps,
+        warmup_steps=0,  # Auto-compute
         eval_every=args.eval_every,
-        save_every=args.save_every
+        save_every=args.save_every,
+        hierarchical_mode=hierarchical_mode,
+        kl_weight=args.kl_weight if hierarchical_mode else 0.0,
+        l2sp_weight=args.l2sp_weight if hierarchical_mode else 0.0,
+        base_model_for_kl=base_model_for_kl
     )
 
     # Train

@@ -52,6 +52,17 @@ Downloading data from third party sources must be done in a reproducible way (th
 Data processing should be cachable so if any stage of the transformation or data processing fails it does not start from scrach. If a dataloader class is being used and data is not present on the system, it should trigger logic to get the data and handle any transformations necssary. The whole pipeline should be self informed about what is hapenning and aware of the phase its in. If third party requests are made ferquently, they should also be cached to prevent overloading any servers.
 Dataloaders defined in pytorch if handling for example 1e6 images with a storage bucket like minio (just a dummy example it should be generaliziable) must stream the data as it is being used for training just in time.
 
+#### MACHINE LEARNING TENETS - YOU MUST FOLLOW THESE TENETS
+Any task that has something to do with machine learning will be structured in the following:
+- A task will consist of training a model or fine-tuning a model on some input which maps to some output
+- It is important to follow the no free lunch theorem and try multiple different models for that mapping of I/O. For this purpose there should be a consistent benchmark that can tell us how well the output (target variable(s)) are being predicted - this is our eval/loss function which should not change model-to-model so that we can always compare and pick the best one. Make sure to define this always first.
+- We always need to define some training loop which will feed the model our inputs and evalute its outputs, model providers or architectures that might vary should be training loop agnostic which means any of them should respect the entry points and formats and adapt to it.
+- Every time a model is run and evaluated it should be logged into something like tensorboard properly.
+- Experiment naming hygine must include for each entry the following (task, model architecture or type, model size or key differentiating factor, dataset used).
+- Data hygine should follow train,test,validation splits where our validation is out of bag data we look at once the model training with train/test is complete.
+- A good principle to follow for multiple models for testing the solution spaces is to start with one really big overkill solution and one really simple solution to get the range of inbetween where the future models can actually be built.
+
+
 #### `ml/models` - creating model architectures and defining training loops
 Define the architectuer in arch.py and training loop in train.py - training should be logged with tensorboard always and evaluations metrics should be versioned and defined in separate logic units like eval.py to make experiments comparable, if at any poitns eval metrics change or scale they should be tracked under a sparate track of experiments in tensorboard - do not arbitrarily modify the eval of anything or loss unless explicitly necessary.
 Experiments should be tracked with meaningful names and logging any parameters into experiments. Machine learning is a life cycle and always evolving. DO NOT create any rogue execution scripts just use the train.py for training.

@@ -423,14 +423,99 @@ class Florence2Model(BaseVisionLanguageModel):
         self.processor.save_pretrained(output_dir)
         print("✓ Adapter saved")
 
-    def load_adapter(self, adapter_path: str) -> None:
-        """Load a LoRA adapter from disk."""
-        print(f"Loading LoRA adapter from {adapter_path}...")
-        self.model = PeftModel.from_pretrained(
-            self.base_model,
-            adapter_path
+    def load_adapter(
+        self,
+        adapter_path: str,
+        adapter_name: str = "default",
+        is_trainable: bool = True
+    ) -> None:
+        """
+        Load a LoRA adapter from disk.
+
+        Args:
+            adapter_path: Path to adapter weights
+            adapter_name: Name for the adapter (enables multi-adapter composition)
+            is_trainable: Whether adapter should be trainable
+        """
+        print(f"Loading LoRA adapter '{adapter_name}' from {adapter_path}...")
+        self.model.load_adapter(adapter_path, adapter_name=adapter_name)
+
+        # Set trainability
+        if not is_trainable:
+            for name, param in self.model.named_parameters():
+                if adapter_name in name:
+                    param.requires_grad = False
+            print(f"✓ Adapter '{adapter_name}' loaded and frozen")
+        else:
+            print(f"✓ Adapter '{adapter_name}' loaded (trainable)")
+
+    def set_adapter(self, adapter_names: list) -> None:
+        """
+        Set active adapters for inference/training.
+
+        Args:
+            adapter_names: List of adapter names to activate (e.g., ["bootstrap", "user"])
+        """
+        self.model.set_adapter(adapter_names)
+        print(f"✓ Active adapters: {adapter_names}")
+
+    def get_adapter_state_dict(self, adapter_name: str = "default") -> dict:
+        """
+        Get state dict for a specific adapter.
+
+        Args:
+            adapter_name: Name of the adapter
+
+        Returns:
+            Adapter state dict
+        """
+        state_dict = {}
+        for name, param in self.model.named_parameters():
+            if adapter_name in name:
+                state_dict[name] = param
+        return state_dict
+
+    def prepare_training_batch(self, images: list, texts: list) -> dict:
+        """
+        Prepare batch for training with Florence-2 task format.
+
+        Args:
+            images: List of PIL Images
+            texts: List of ground truth texts
+
+        Returns:
+            Processed batch ready for forward pass
+        """
+        # Florence-2 uses task prompts
+        # For OCR training: <OCR>ground_truth</s>
+        texts_formatted = [f"<OCR>{text}" for text in texts]
+
+        # Process through processor
+        inputs = self.processor(
+            text=texts_formatted,
+            images=images,
+            return_tensors="pt",
+            padding=True,
+            truncation=False
         )
-        print("✓ Adapter loaded")
+
+        # Handle long sequences
+        max_seq_len = 1024
+        if inputs['input_ids'].shape[1] > max_seq_len:
+            inputs['input_ids'] = inputs['input_ids'][:, :max_seq_len]
+            inputs['attention_mask'] = inputs['attention_mask'][:, :max_seq_len]
+
+        # Create labels
+        labels = inputs['input_ids'].clone()
+        labels[labels == self.tokenizer.pad_token_id] = -100
+
+        return {
+            'pixel_values': inputs['pixel_values'],
+            'image_grid_thw': inputs.get('image_grid_thw'),
+            'input_ids': inputs['input_ids'],
+            'attention_mask': inputs['attention_mask'],
+            'labels': labels
+        }
 
     def get_trainable_parameters(self) -> int:
         """Get count of trainable parameters."""
