@@ -31,9 +31,9 @@ from ray.util.queue import Queue
 import torch
 
 # Ray actors for training
-@ray.remote(num_gpus=1)
+@ray.remote(num_gpus=0.3)  # Fractional GPU allocation for sharing
 class ModelTrainer:
-    """Actor that trains a single model on one GPU."""
+    """Actor that trains a single model on shared GPU."""
 
     def __init__(self, gpu_id: int):
         self.gpu_id = gpu_id
@@ -280,7 +280,7 @@ class RayOrchestrator:
             {"model": "smolvlm-500m", "quant": "4bit", "experiment": "smolvlm500m-4bit", "vram_gb": 8},
             {"model": "qwen3-vl-2b", "quant": "4bit", "experiment": "qwen3-2b-4bit", "vram_gb": 14},
             {"model": "qwen3-vl-2b", "quant": "none", "experiment": "qwen3-2b-fp16", "vram_gb": 15},
-            {"model": "qwen3-vl-4b", "quant": "4bit", "experiment": "qwen3-4b-4bit", "vram_gb": 20},
+            {"model": "qwen3-vl-4b", "quant": "4bit", "experiment": "qwen3-4b-4bit", "vram_gb": 15},
         ]
 
     def run(self):
@@ -404,7 +404,7 @@ class RayOrchestrator:
     def _pack_jobs_into_batches(self):
         """Pack jobs into batches that fit in GPU memory using greedy bin packing."""
         batches = []
-        gpu_capacity = 35  # A100 40GB with 5GB safety margin
+        gpu_capacity = 40  # A100 40GB with 5GB safety margin
 
         # Sort jobs by VRAM requirements (largest first for better packing)
         sorted_jobs = sorted(self.jobs, key=lambda j: j['vram_gb'], reverse=True)
