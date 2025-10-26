@@ -302,6 +302,16 @@ class Qwen3VLModel(BaseVisionLanguageModel):
         else:
             transcription = generated_text.strip()
 
+        #TODO: remove the "assistant" token prefixing it all from the transcription
+        """
+        Sample 1:
+        Ground Truth: Soon a carnival springs up on the sight of
+        Prediction:   assistant
+        Scan a crucial spring up on the signal of
+        ---
+        we need to fix this
+        """
+
         return transcription
 
     def save_adapter(self, output_dir: str) -> None:

@@ -1,16 +1,14 @@
-"""
-PyTorch datasets for DisgraPhi training stages.
-"""
+"""PyTorch datasets for DisgraPhi training stages."""
 
-import os
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional, Sequence, Tuple
+import numpy as np
 import torch
 from torch.utils.data import Dataset
 from PIL import Image
-import numpy as np
 
-from ml.data.augmentation import HandwritingAugmentation, MinimalAugmentation
+from ml.data.augmentation import HandwritingAugmentation
+from ml.data.etl import IAMDownloader
 
 
 class IAMDataset(Dataset):
@@ -31,18 +29,55 @@ class IAMDataset(Dataset):
         data_dir: str,
         split: str = 'train',
         transform=None,
-        sample_ratio: float = 1.0
+        sample_ratio: float = 1.0,
+        seed: Optional[int] = None
     ):
         self.data_dir = Path(data_dir)
         self.split = split
         self.transform = transform
         self.sample_ratio = sample_ratio
+        self.seed = seed if seed is not None else 2025
 
         if not (0.0 < sample_ratio <= 1.0):
             raise ValueError(f"sample_ratio must be in (0, 1], got {sample_ratio}")
 
+        # Resolve directory and download IAM data if necessary
+        self._ensure_data_ready()
+
         # Load line image paths and ground truth
         self.samples = self._load_samples()
+
+    def _ensure_data_ready(self) -> None:
+        """Ensure IAM processed data exists, downloading if missing."""
+
+        processed_candidate = self.data_dir
+
+        # Allow users to pass either the processed directory or the root
+        if processed_candidate.is_dir() and (processed_candidate / 'splits').exists():
+            return
+
+        if not processed_candidate.exists() and processed_candidate.name == 'processed':
+            processed_candidate = processed_candidate.parent
+
+        if (processed_candidate / 'processed' / 'splits').exists():
+            self.data_dir = processed_candidate / 'processed'
+            return
+
+        # Trigger automatic download + processing
+        root_dir = processed_candidate if processed_candidate.name != 'processed' else processed_candidate.parent
+        downloader = IAMDownloader(data_dir=str(root_dir))
+
+        try:
+            print("IAMDataset: processed data not found – downloading via IAMDownloader...")
+            downloader.download(force=False)
+            downloader.process()
+        except Exception as exc:  # pragma: no cover - requires external service
+            raise RuntimeError(
+                "Failed to automatically prepare IAM dataset. "
+                "Ensure HF_TOKEN is set and IAM credentials are valid."
+            ) from exc
+
+        self.data_dir = downloader.processed_dir
 
     def _load_samples(self) -> List[Dict[str, str]]:
         """Load image paths and corresponding ground truth text."""
@@ -71,9 +106,9 @@ class IAMDataset(Dataset):
         if self.sample_ratio < 1.0:
             original_count = len(samples)
             # Use numpy for reproducible random sampling
-            np.random.seed(42)  # Fixed seed for reproducibility
+            rng = np.random.default_rng(self.seed)
             n_samples = int(len(samples) * self.sample_ratio)
-            indices = np.random.choice(len(samples), size=n_samples, replace=False)
+            indices = rng.choice(len(samples), size=n_samples, replace=False)
             samples = [samples[i] for i in sorted(indices)]
             print(f"Downsampled {self.split} set: {original_count} -> {len(samples)} samples ({self.sample_ratio*100:.0f}%)")
 
@@ -139,12 +174,21 @@ class PersonalizationDataset(Dataset):
         # Check if using new manifest format
         manifest_path = self.user_dir / 'manifest.json'
         if manifest_path.exists():
-            # Use ManifestDataset
+            subset = 'all'
+            split_ratios = (0.8, 0.1, 0.1)
+
+            if split is not None or split_type is not None:
+                subset = split_type if split_type is not None else 'all'
+                train_ratio = split if split is not None else 0.8
+                val_ratio = max(0.0, 1.0 - train_ratio)
+                split_ratios = (train_ratio, val_ratio, 0.0)
+
             self._dataset = ManifestDataset(
                 data_dir=user_dir,
                 transform=transform,
-                split=split,
-                split_type=split_type
+                subset=subset,
+                split_ratios=split_ratios,
+                seed=2025
             )
         else:
             # Fallback to old format (for backward compatibility)
@@ -240,30 +284,26 @@ class ManifestDataset(Dataset):
         self,
         data_dir: str,
         transform=None,
-        split: Optional[float] = None,
-        split_type: Optional[str] = None,
+        subset: str = 'all',
+        split_ratios: Sequence[float] = (0.8, 0.1, 0.1),
+        seed: Optional[int] = None,
         augment: bool = False,
         augment_strength: float = 0.7,
         augment_prob: float = 0.5
     ):
         self.data_dir = Path(data_dir)
         self.transform = transform
-        self.split = split
-        self.split_type = split_type
+        self.subset = subset
+        self.split_ratios = tuple(split_ratios)
+        self.seed = seed if seed is not None else 2025
         self.augment = augment
 
         # Setup augmentation pipeline
-        if augment:
-            # Use minimal augmentation for very few samples (< 10)
-            # Heavy augmentation for 10+ samples
-            if split_type == 'train':
-                self.augmenter = HandwritingAugmentation(
-                    strength=augment_strength,
-                    prob=augment_prob
-                )
-            else:
-                # No augmentation for validation
-                self.augmenter = None
+        if augment and subset == 'train':
+            self.augmenter = HandwritingAugmentation(
+                strength=augment_strength,
+                prob=augment_prob
+            )
         else:
             self.augmenter = None
 
@@ -292,24 +332,46 @@ class ManifestDataset(Dataset):
                     'sample_id': sample_data.get('index', len(samples))
                 })
 
-        # Apply train/val split if requested
-        if self.split is not None and self.split_type is not None:
-            n_samples = len(samples)
-            n_train = int(n_samples * self.split)
+        # Apply train/val/test split if requested
+        if self.subset != 'all':
+            if len(self.split_ratios) != 3:
+                raise ValueError("split_ratios must contain three values (train, val, test)")
 
-            if self.split_type == 'train':
-                samples = samples[:n_train]
-            elif self.split_type == 'val':
-                samples = samples[n_train:]
+            if not np.isclose(sum(self.split_ratios), 1.0, atol=1e-6):
+                raise ValueError("split_ratios must sum to 1.0")
+
+            n_samples = len(samples)
+            if n_samples < 3:
+                raise ValueError("At least 3 samples are required to compute train/val/test splits")
+
+            indices = np.arange(n_samples)
+            rng = np.random.default_rng(self.seed)
+            rng.shuffle(indices)
+
+            train_end = int(self.split_ratios[0] * n_samples)
+            val_end = train_end + int(self.split_ratios[1] * n_samples)
+
+            # Guarantee at least one sample per split when possible
+            train_end = max(train_end, 1)
+            val_end = max(val_end, train_end + 1)
+            val_end = min(val_end, n_samples - 1)
+
+            if self.subset == 'train':
+                chosen = indices[:train_end]
+            elif self.subset == 'val':
+                chosen = indices[train_end:val_end]
+            elif self.subset == 'test':
+                chosen = indices[val_end:]
             else:
-                raise ValueError(f"split_type must be 'train' or 'val', got {self.split_type}")
+                raise ValueError("subset must be one of {'train','val','test','all'}")
+
+            samples = [samples[i] for i in sorted(chosen)]
 
         if len(samples) == 0:
             raise ValueError(f"No valid samples found in {self.data_dir}")
 
-        print(f"Loaded {len(samples)} samples from {self.data_dir}")
-        if self.split_type:
-            print(f"  Split: {self.split_type} ({len(samples)} samples)")
+        subset_label = self.subset if self.subset != 'all' else 'full'
+        print(f"Loaded {len(samples)} samples from {self.data_dir} [{subset_label}]")
 
         return samples
 

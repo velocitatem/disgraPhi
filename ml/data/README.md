@@ -49,6 +49,8 @@ export IAM_USERNAME=your_username
 export IAM_PASSWORD=your_password
 ```
 
+> **Tip:** Training code will now trigger `IAMDownloader` automatically if the processed corpus is missing. Running the CLI once is still recommended so you can monitor download progress explicitly.
+
 ### Download IAM Database
 
 ```bash

@@ -20,7 +20,9 @@ Features:
 """
 
 import os
+import re
 import argparse
+import random
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -28,17 +30,96 @@ from torch.utils.tensorboard import SummaryWriter
 from transformers import get_linear_schedule_with_warmup
 from tqdm import tqdm
 from pathlib import Path
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple, Any
 import numpy as np
 from alveslib import get_logger
 
 from ml.models.providers import create_model, MODEL_REGISTRY, BaseVisionLanguageModel
 from ml.data.datasets import IAMDataset, PersonalizationDataset, ManifestDataset
-from ml.models.eval import model_agnostic_loss
+from ml.models.eval import model_agnostic_loss, compute_ocr_metrics
 
 
 logger = get_logger("ml-trainloop")
 
+
+DEFAULT_SEED = 2025
+EXPERIMENT_NAME_PATTERN = re.compile(r'^[a-z0-9]+(?:-[a-z0-9]+)?(?:\.[a-z0-9]+(?:-[a-z0-9]+)?){3}$')
+
+
+def _slugify(value: str) -> str:
+    """Convert an arbitrary string into a lowercase slug suitable for paths."""
+
+    value = value.lower()
+    value = re.sub(r'[^a-z0-9\-]+', '-', value)
+    return value.strip('-') or 'unnamed'
+
+
+def _resolve_seed(cli_seed: Optional[int] = None) -> int:
+    """Derive the global random seed from CLI, environment, or defaults."""
+
+    if cli_seed is not None:
+        return cli_seed
+
+    for env_key in ("DISGRAPHI_SEED", "SEED"):
+        env_val = os.getenv(env_key)
+        if env_val is not None:
+            try:
+                return int(env_val)
+            except ValueError:
+                logger.warning("Ignoring non-integer value for %s: %s", env_key, env_val)
+
+    return DEFAULT_SEED
+
+
+def _set_global_seed(seed: int) -> None:
+    """Apply deterministic seeding across libraries."""
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    logger.info("Using global seed: %d", seed)
+
+
+def _validate_experiment_name(name: str) -> Tuple[str, str, str, str]:
+    """Ensure experiment naming follows task.model.variant.dataset hygiene."""
+
+    if not EXPERIMENT_NAME_PATTERN.fullmatch(name):
+        raise ValueError(
+            "experiment-name must follow 'task.model.variant.dataset' using lowercase "
+            "alphanumerics or dashes (e.g., ocr-bootstrap.smolvlm.256m.iam)"
+        )
+
+    task, model_arch, variant, dataset = name.split('.')
+    return task, model_arch, variant, dataset
+
+
+def _infer_experiment_name(args) -> Tuple[str, str, str, str, str]:
+    """Return validated experiment name and its components."""
+
+    if args.experiment_name:
+        experiment = args.experiment_name
+    else:
+        task = _slugify(f"ocr-{args.mode}")
+        model_parts = args.model_type.split('-', 1)
+        model_arch = _slugify(model_parts[0])
+        variant = _slugify(model_parts[1]) if len(model_parts) > 1 else 'base'
+        if args.mode == 'bootstrap':
+            data_path = Path(args.data_dir)
+            dataset_name = data_path.name or 'iam'
+            if dataset_name == 'processed':
+                dataset_name = data_path.parent.name or dataset_name
+            dataset = _slugify(dataset_name or 'iam')
+        else:
+            dataset = _slugify(Path(args.user_dir).name)
+        experiment = '.'.join([task, model_arch, variant, dataset])
+
+    task, model_arch, variant, dataset = _validate_experiment_name(experiment)
+    return experiment, task, model_arch, variant, dataset
 
 class DisgraPhiTrainer:
     """
@@ -68,6 +149,7 @@ class DisgraPhiTrainer:
         train_dataset,
         val_dataset,
         output_dir: str,
+        test_dataset=None,
         experiment_name: str = "default",
         learning_rate: float = 1e-5,
         batch_size: int = 2,
@@ -88,6 +170,7 @@ class DisgraPhiTrainer:
         self.experiment_name = experiment_name
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
+        self.test_dataset = test_dataset
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -134,6 +217,17 @@ class DisgraPhiTrainer:
             collate_fn=self._collate_fn
         )
 
+        self.test_loader = None
+        if test_dataset is not None:
+            self.test_loader = DataLoader(
+                test_dataset,
+                batch_size=batch_size,
+                shuffle=False,
+                num_workers=4,
+                pin_memory=True,
+                collate_fn=self._collate_fn
+            )
+
         # Setup optimizer (only trainable parameters)
         trainable_params = [p for p in model.parameters() if p.requires_grad]
         self.optimizer = torch.optim.AdamW(
@@ -166,6 +260,8 @@ class DisgraPhiTrainer:
         logger.info(f"Trainer initialized")
         logger.info(f"  Training samples: {len(train_dataset)}")
         logger.info(f"  Validation samples: {len(val_dataset)}")
+        if self.test_dataset is not None:
+            logger.info(f"  Test samples: {len(self.test_dataset)}")
         logger.info(f"  Batch size: {batch_size}")
         logger.info(f"  Gradient accumulation: {gradient_accumulation_steps}")
         logger.info(f"  Effective batch size: {batch_size * gradient_accumulation_steps}")
@@ -182,7 +278,24 @@ class DisgraPhiTrainer:
         texts = [item['text'] for item in batch]
 
         # Delegate preprocessing to model
-        return self.model.prepare_training_batch(images, texts)
+        processed = self.model.prepare_training_batch(images, texts)
+        processed['ground_truth_texts'] = texts
+        return processed
+
+    def _move_batch_to_device(self, batch: Dict[str, Any]) -> Dict[str, Any]:
+        """Move tensors in the batch to the model device, keep metadata intact."""
+
+        result: Dict[str, Any] = {}
+        for key, value in batch.items():
+            if value is None:
+                continue
+
+            if hasattr(value, 'to'):
+                result[key] = value.to(self.model.device)
+            else:
+                result[key] = value
+
+        return result
 
     def _compute_gradient_norm(self) -> float:
         """Compute the global gradient norm across all parameters."""
@@ -272,106 +385,133 @@ class DisgraPhiTrainer:
 
         return kl_loss
 
+    def _generate_predictions(
+        self,
+        dataset,
+        limit: Optional[int] = None,
+        description: Optional[str] = None
+    ) -> Tuple[List[str], List[str]]:
+        """Generate predictions for a dataset (optionally limited)."""
+
+        total = len(dataset)
+        max_items = total if limit is None else min(limit, total)
+        if max_items == 0:
+            return [], []
+
+        iterator = range(max_items)
+        if description:
+            iterator = tqdm(iterator, desc=description)
+
+        predictions: List[str] = []
+        ground_truths: List[str] = []
+
+        self.model.eval()
+        with torch.no_grad():
+            for idx in iterator:
+                sample = dataset[idx]
+                image = sample['image']
+                ground_truth = sample['text']
+
+                try:
+                    image_input = image.convert('RGB') if hasattr(image, 'convert') else image
+                    prediction = self.model.generate(
+                        pixel_values=image_input,
+                        prompt="Transcribe this handwritten text.",
+                        max_new_tokens=128,
+                        temperature=0.0
+                    )
+
+                    if isinstance(prediction, tuple):
+                        prediction_text = prediction[0]
+                    else:
+                        prediction_text = prediction
+
+                    predictions.append(str(prediction_text))
+                    ground_truths.append(str(ground_truth))
+
+                except Exception as exc:  # pragma: no cover - generation depends on model
+                    logger.warning("Failed to generate prediction for sample %s: %s", idx, exc)
+                    continue
+
+        return predictions, ground_truths
+
+    def _compute_full_metrics(
+        self,
+        predictions: List[str],
+        ground_truths: List[str]
+    ) -> Optional[Dict[str, float]]:
+        """Compute averaged OCR metrics across all prediction pairs."""
+
+        valid_pairs = [
+            (pred.strip(), gt.strip())
+            for pred, gt in zip(predictions, ground_truths)
+            if gt.strip()
+        ]
+
+        if not valid_pairs:
+            return None
+
+        totals = {
+            'cer': 0.0,
+            'wer': 0.0,
+            'ned': 0.0,
+            'accuracy': 0.0,
+            'hybrid_loss': 0.0
+        }
+
+        for pred, gt in valid_pairs:
+            metrics = compute_ocr_metrics(gt, pred)
+            totals['cer'] += metrics['cer']
+            totals['wer'] += metrics['wer']
+            totals['ned'] += metrics['ned']
+            totals['accuracy'] += metrics['accuracy']
+            totals['hybrid_loss'] += model_agnostic_loss(gt, pred)
+
+        count = len(valid_pairs)
+        averaged = {key: value / count for key, value in totals.items()}
+        averaged['num_samples'] = count
+        return averaged
+
+    def _benchmark_dataset(self, dataset, split_name: str) -> Optional[Dict[str, float]]:
+        """Run full benchmark over a dataset and return averaged metrics."""
+
+        logger.info("Running %s hybrid OCR benchmark on %d samples", split_name, len(dataset))
+        predictions, ground_truths = self._generate_predictions(
+            dataset,
+            limit=None,
+            description=f"{split_name} benchmark"
+        )
+        metrics = self._compute_full_metrics(predictions, ground_truths)
+        if metrics is None:
+            logger.error("No valid prediction pairs generated for %s benchmark", split_name)
+            return None
+
+        logger.info(
+            "%s metrics | hybrid=%.4f cer=%.4f wer=%.4f ned=%.4f accuracy=%.4f (n=%d)",
+            split_name,
+            metrics['hybrid_loss'],
+            metrics['cer'],
+            metrics['wer'],
+            metrics['ned'],
+            metrics['accuracy'],
+            metrics['num_samples']
+        )
+        return metrics
+
     def _generate_sample_predictions(
         self,
         num_samples: int = 3
     ) -> List[Dict[str, str]]:
         """Generate sample predictions for qualitative evaluation."""
-        self.model.eval()
-        samples = []
+        predictions, ground_truths = self._generate_predictions(
+            self.val_dataset,
+            limit=num_samples
+        )
 
-        # Get a few samples from validation set
-        val_samples = []
-        for i, sample in enumerate(self.val_dataset):
-            if i >= num_samples:
-                break
-            val_samples.append(sample)
-
-        with torch.no_grad():
-            for sample in val_samples:
-                image = sample['image']
-                ground_truth = sample['text']
-
-                try:
-                    # Convert PIL image to RGB if needed
-                    if hasattr(image, 'convert'):
-                        image = image.convert('RGB')
-
-                    # Use model's generate method (unified interface)
-                    prediction = self.model.generate(
-                        pixel_values=image,
-                        prompt="Transcribe this handwritten text.",
-                        max_new_tokens=128,
-                        temperature=0.0  # Greedy decoding for eval
-                    )
-
-                    # Handle models that return tuple (text, parsed_dict)
-                    # vs models that return just text
-                    if isinstance(prediction, tuple):
-                        prediction_text = prediction[0]  # Extract just the text
-                    else:
-                        prediction_text = prediction
-
-                    samples.append({
-                        'ground_truth': ground_truth,
-                        'prediction': prediction_text
-                    })
-
-                except Exception as e:
-                    logger.warning(f"Failed to generate sample prediction: {e}")
-                    continue
-
-        return samples
-
-    def _compute_hybrid_ocr_loss(
-        self,
-        predictions: List[str],
-        ground_truths: List[str]
-    ) -> Dict[str, float]:
-        """
-        Compute hybrid OCR loss combining CER, WER, and NED.
-
-        Returns average hybrid loss across all samples, plus individual metrics.
-        """
-        logger.info(f"Computing hybrid OCR metrics for {len(predictions)} predictions")
-
-        # Filter out empty strings
-        valid_pairs = [
-            (pred, gt) for pred, gt in zip(predictions, ground_truths)
-            if pred.strip() and gt.strip()
+        return [
+            {'ground_truth': gt, 'prediction': pred}
+            for pred, gt in zip(predictions, ground_truths)
         ]
-
-        logger.info(f"Valid pairs after filtering: {len(valid_pairs)}/{len(predictions)}")
-
-        if not valid_pairs:
-            logger.warning("No valid prediction pairs found! All predictions or ground truths are empty.")
-            logger.warning(f"Sample predictions: {predictions[:3]}")
-            logger.warning(f"Sample ground truths: {ground_truths[:3]}")
-            return {'hybrid_loss': None}
-
-        # Compute hybrid loss for each pair
-        hybrid_losses = []
-        for pred, gt in valid_pairs:
-            try:
-                loss = model_agnostic_loss(gt, pred)
-                hybrid_losses.append(loss)
-            except Exception as e:
-                logger.warning(f"Failed to compute loss for pair: {e}")
-                continue
-
-        if not hybrid_losses:
-            logger.error("Failed to compute any hybrid losses")
-            return {'hybrid_loss': None}
-
-        # Average across all samples
-        avg_hybrid_loss = np.mean(hybrid_losses)
-
-        logger.info(f"Hybrid OCR Loss: {avg_hybrid_loss:.4f} (lower is better)")
-
-        return {
-            'hybrid_loss': avg_hybrid_loss,
-            'num_samples': len(hybrid_losses)
-        }
 
     def train_epoch(self):
         """Train for one epoch."""
@@ -385,8 +525,8 @@ class DisgraPhiTrainer:
         )
 
         for step, batch in enumerate(progress_bar):
-            # Move batch to device
-            batch = {k: v.to(self.model.device) for k, v in batch.items() if v is not None}
+            # Move batch to device while preserving metadata
+            batch = self._move_batch_to_device(batch)
 
             # Forward pass
             outputs = self.model(
@@ -493,7 +633,7 @@ class DisgraPhiTrainer:
 
                 # Evaluation
                 if self.global_step % self.eval_every == 0:
-                    self.evaluate()
+                    self.evaluate(compute_benchmark=False)
                     self.model.train()
 
                 # Save checkpoint
@@ -502,20 +642,30 @@ class DisgraPhiTrainer:
 
         self.epoch += 1
 
-    def evaluate(self):
-        """Run evaluation on validation set with comprehensive metrics."""
+    def evaluate(
+        self,
+        loader=None,
+        split_name: str = 'val',
+        compute_benchmark: bool = True
+    ) -> Tuple[Optional[float], Optional[Dict[str, float]]]:
+        """Run evaluation on a loader and optionally compute the hybrid benchmark."""
+
+        loader = loader or self.val_loader
+        if loader is None:
+            logger.warning("No %s loader available for evaluation", split_name)
+            return None, None
+
+        dataset = self.val_dataset if loader is self.val_loader else self.test_dataset
         self.model.eval()
-        total_loss = 0
+
+        total_loss = 0.0
         num_batches = 0
 
-        logger.info("Running evaluation...")
+        logger.info("Running %s evaluation...", split_name)
 
         with torch.no_grad():
-            for batch in tqdm(self.val_loader, desc="Evaluating"):
-                # Move batch to device
-                batch = {k: v.to(self.model.device) for k, v in batch.items() if v is not None}
-
-                # Forward pass
+            for batch in tqdm(loader, desc=f"Evaluating ({split_name})"):
+                batch = self._move_batch_to_device(batch)
                 outputs = self.model(
                     pixel_values=batch['pixel_values'],
                     image_grid_thw=batch.get('image_grid_thw'),
@@ -527,64 +677,53 @@ class DisgraPhiTrainer:
                 total_loss += outputs['loss'].item()
                 num_batches += 1
 
-        avg_val_loss = total_loss / num_batches
-        val_perplexity = self._compute_perplexity(avg_val_loss)
+        if num_batches == 0:
+            logger.warning("No batches processed during %s evaluation", split_name)
+            return None, None
 
-        # Generate sample predictions for qualitative analysis
-        logger.info("Generating sample predictions...")
-        sample_predictions = self._generate_sample_predictions(num_samples=5)
+        avg_loss = total_loss / num_batches
+        perplexity = self._compute_perplexity(avg_loss)
 
-        # Compute hybrid OCR loss on samples
-        if sample_predictions:
-            logger.info(f"Generated {len(sample_predictions)} sample predictions")
-            predictions = [s['prediction'] for s in sample_predictions]
-            ground_truths = [s['ground_truth'] for s in sample_predictions]
+        self.writer.add_scalar(f'{split_name}/loss', avg_loss, self.global_step)
+        self.writer.add_scalar(f'{split_name}/perplexity', perplexity, self.global_step)
 
-            # Log first sample for debugging
-            if sample_predictions:
-                logger.info(f"Sample 1 GT: {ground_truths[0][:50]}...")
-                logger.info(f"Sample 1 Pred: {predictions[0][:50]}...")
+        logger.info("%s Loss: %.4f", split_name.capitalize(), avg_loss)
+        logger.info("%s Perplexity: %.2f", split_name.capitalize(), perplexity)
 
-            ocr_metrics = self._compute_hybrid_ocr_loss(predictions, ground_truths)
+        benchmark_metrics: Optional[Dict[str, float]] = None
 
-            # Log sample predictions as text
-            samples_text = "\n\n".join([
-                f"Sample {i+1}:\n"
-                f"Ground Truth: {s['ground_truth']}\n"
-                f"Prediction:   {s['prediction']}"
-                for i, s in enumerate(sample_predictions)
-            ])
-            self.writer.add_text('val/sample_predictions', samples_text, self.global_step)
+        if compute_benchmark and dataset is not None:
+            benchmark_metrics = self._benchmark_dataset(dataset, split_name)
+            if benchmark_metrics:
+                self.writer.add_scalar(f'{split_name}/hybrid_ocr_loss', benchmark_metrics['hybrid_loss'], self.global_step)
+                self.writer.add_scalar(f'{split_name}/cer', benchmark_metrics['cer'], self.global_step)
+                self.writer.add_scalar(f'{split_name}/wer', benchmark_metrics['wer'], self.global_step)
+                self.writer.add_scalar(f'{split_name}/ned', benchmark_metrics['ned'], self.global_step)
+                self.writer.add_scalar(f'{split_name}/accuracy', benchmark_metrics['accuracy'], self.global_step)
 
-            # Log hybrid OCR loss (only if not None)
-            if ocr_metrics['hybrid_loss'] is not None:
-                self.writer.add_scalar('val/hybrid_ocr_loss', ocr_metrics['hybrid_loss'], self.global_step)
-                logger.info(f"Validation Hybrid OCR Loss: {ocr_metrics['hybrid_loss']:.4f}")
-            else:
-                logger.error("Failed to compute hybrid OCR loss - predictions may be empty")
-        else:
-            ocr_metrics = {'hybrid_loss': None}
-            logger.error("No sample predictions generated - check model.generate() method")
+                samples = self._generate_sample_predictions(num_samples=5)
+                if samples:
+                    samples_text = "\n\n".join([
+                        f"Sample {i+1}:\nGround Truth: {s['ground_truth']}\nPrediction:   {s['prediction']}"
+                        for i, s in enumerate(samples)
+                    ])
+                    self.writer.add_text(f'{split_name}/sample_predictions', samples_text, self.global_step)
 
-        # Log basic metrics
-        self.writer.add_scalar('val/loss', avg_val_loss, self.global_step)
-        self.writer.add_scalar('val/perplexity', val_perplexity, self.global_step)
+        if split_name == 'val' and benchmark_metrics:
+            if benchmark_metrics['hybrid_loss'] < self.best_hybrid_loss:
+                self.best_hybrid_loss = benchmark_metrics['hybrid_loss']
+                self.save_checkpoint('best_model_hybrid')
+                logger.info(
+                    "New best model saved (hybrid_loss: %.4f)",
+                    benchmark_metrics['hybrid_loss']
+                )
 
-        logger.info(f"Validation Loss: {avg_val_loss:.4f}")
-        logger.info(f"Validation Perplexity: {val_perplexity:.2f}")
-
-        # Save best model based on hybrid OCR loss (if available) or validation loss
-        if ocr_metrics['hybrid_loss'] is not None and ocr_metrics['hybrid_loss'] < self.best_hybrid_loss:
-            self.best_hybrid_loss = ocr_metrics['hybrid_loss']
-            self.save_checkpoint('best_model_hybrid')
-            logger.info(f"New best model saved (hybrid_loss: {ocr_metrics['hybrid_loss']:.4f})")
-
-        if avg_val_loss < self.best_val_loss:
-            self.best_val_loss = avg_val_loss
+        if split_name == 'val' and avg_loss < self.best_val_loss:
+            self.best_val_loss = avg_loss
             self.save_checkpoint('best_model_loss')
-            logger.info(f"New best model saved (val_loss: {avg_val_loss:.4f})")
+            logger.info(f"New best model saved (val_loss: {avg_loss:.4f})")
 
-        return avg_val_loss
+        return avg_loss, benchmark_metrics
 
     def train(self):
         """Full training loop."""
@@ -598,7 +737,14 @@ class DisgraPhiTrainer:
                 self.train_epoch()
 
                 # Evaluate at end of epoch
-                self.evaluate()
+                self.evaluate(split_name='val', compute_benchmark=True)
+
+            if self.test_loader is not None:
+                self.evaluate(
+                    loader=self.test_loader,
+                    split_name='test',
+                    compute_benchmark=True
+                )
 
             # Save final model
             self.save_checkpoint('final_model')
@@ -647,17 +793,19 @@ def main():
         epilog="""
 Examples:
   # Bootstrap training on IAM dataset
-  python train.py --mode bootstrap --model smolvlm-256m --experiment-name iam-base
+  python train.py --mode bootstrap --model smolvlm-256m \\
+    --experiment-name ocr-bootstrap.smolvlm.256m.iam
 
   # Few-shot personalization (5-20 samples)
   python train.py --mode personalize --model smolvlm-256m \\
-    --experiment-name user-john --user-dir data/john \\
-    --bootstrap ml/checkpoints/bootstrap/best_model_cer \\
+    --user-dir data/john --bootstrap ml/checkpoints/bootstrap/... \\
+    --experiment-name ocr-personalize.smolvlm.256m.john \\
     --user-rank 2 --augment --kl 0.5
 
   # Full personalization (50+ samples)
   python train.py --mode personalize --model smolvlm-256m \\
-    --user-dir data/john --bootstrap ml/checkpoints/bootstrap/best_model_cer \\
+    --user-dir data/john --bootstrap ml/checkpoints/bootstrap/... \\
+    --experiment-name ocr-personalize.smolvlm.256m.john \\
     --user-rank 4 --augment --kl 0.3 --epochs 10
         """
     )
@@ -668,10 +816,10 @@ Examples:
     parser.add_argument('--model', dest='model_type', type=str, required=True,
                         choices=list(MODEL_REGISTRY.keys()),
                         help='Model architecture')
-    parser.add_argument('--experiment-name', type=str, default='default',
-                        help='Name for experiment tracking (tensorboard)')
+    parser.add_argument('--experiment-name', type=str, default=None,
+                        help="Explicit experiment name following 'task.model.variant.dataset'")
     parser.add_argument('--output-dir', type=str, default='ml/checkpoints',
-                        help='Base output directory (mode/experiment-name will be appended)')
+                        help='Base output directory (task/model/variant/dataset folders appended)')
 
     # === Data ===
     data_group = parser.add_argument_group('data')
@@ -718,8 +866,13 @@ Examples:
                             help='Evaluation interval in steps (default: 100)')
     train_group.add_argument('--save-every', type=int, default=500,
                             help='Checkpoint save interval in steps (default: 500)')
+    train_group.add_argument('--seed', type=int, default=None,
+                             help='Override random seed (env DISGRAPHI_SEED/SEED otherwise, default 2025)')
 
     args = parser.parse_args()
+
+    seed = _resolve_seed(args.seed)
+    _set_global_seed(seed)
 
     # === Smart Defaults Based on Mode ===
     if args.mode == 'bootstrap':
@@ -736,7 +889,6 @@ Examples:
         args.learning_rate = args.learning_rate or 5e-4
         # Auto-set epochs based on dataset size if not specified
         if args.num_epochs is None:
-            from pathlib import Path
             import json
             manifest_path = Path(args.user_dir) / 'manifest.json'
             if manifest_path.exists():
@@ -755,8 +907,12 @@ Examples:
     args.load_in_4bit = (args.quant == '4bit')
     args.load_in_8bit = (args.quant == '8bit')
 
-    # Build full output path
-    args.output_dir = f"{args.output_dir}/{args.mode}_{args.model_type}/{args.experiment_name}"
+    experiment_name, task_token, model_arch_token, variant_token, dataset_token = _infer_experiment_name(args)
+    args.experiment_name = experiment_name
+
+    # Build full output path following naming hygiene
+    output_path = Path(args.output_dir) / task_token / model_arch_token / variant_token / dataset_token
+    args.output_dir = str(output_path)
 
     # Print configuration summary
     logger.info("=" * 60)
@@ -764,6 +920,7 @@ Examples:
     logger.info(f"Model: {args.model_type}")
     logger.info(f"Experiment: {args.experiment_name}")
     logger.info(f"Output: {args.output_dir}")
+    logger.info(f"Seed: {seed}")
     if args.mode == 'personalize':
         logger.info(f"Bootstrap: {args.bootstrap_adapter}")
         logger.info(f"User data: {args.user_dir}")
@@ -800,6 +957,7 @@ Examples:
         base_model_for_kl.eval()  # Freeze for KL computation
 
     # Load datasets
+    test_dataset = None
     if args.mode == 'bootstrap':
         logger.info("Loading IAM datasets...")
         if args.sample_ratio < 1.0:
@@ -807,12 +965,20 @@ Examples:
         train_dataset = IAMDataset(
             data_dir=args.data_dir,
             split='train',
-            sample_ratio=args.sample_ratio
+            sample_ratio=args.sample_ratio,
+            seed=seed
         )
         val_dataset = IAMDataset(
             data_dir=args.data_dir,
             split='val',
-            sample_ratio=args.sample_ratio
+            sample_ratio=args.sample_ratio,
+            seed=seed
+        )
+        test_dataset = IAMDataset(
+            data_dir=args.data_dir,
+            split='test',
+            sample_ratio=args.sample_ratio,
+            seed=seed
         )
     else:  # personalize
         logger.info(f"Loading user dataset from {args.user_dir}...")
@@ -820,19 +986,52 @@ Examples:
 
         if manifest_path.exists():
             logger.info("Using ManifestDataset")
-            train_dataset = ManifestDataset(
-                data_dir=args.user_dir,
-                split=0.8,
-                split_type='train',
-                augment=args.augment,
-                augment_strength=args.augment_strength
-            )
-            val_dataset = ManifestDataset(
-                data_dir=args.user_dir,
-                split=0.8,
-                split_type='val',
-                augment=False  # No augmentation on validation
-            )
+            split_ratios = (0.7, 0.2, 0.1)
+            try:
+                train_dataset = ManifestDataset(
+                    data_dir=args.user_dir,
+                    subset='train',
+                    split_ratios=split_ratios,
+                    seed=seed,
+                    augment=args.augment,
+                    augment_strength=args.augment_strength
+                )
+                val_dataset = ManifestDataset(
+                    data_dir=args.user_dir,
+                    subset='val',
+                    split_ratios=split_ratios,
+                    seed=seed,
+                    augment=False
+                )
+                test_dataset = ManifestDataset(
+                    data_dir=args.user_dir,
+                    subset='test',
+                    split_ratios=split_ratios,
+                    seed=seed,
+                    augment=False
+                )
+            except ValueError as exc:
+                logger.warning(
+                    "Falling back to 80/20 train/val split (no test set): %s",
+                    exc
+                )
+                fallback_ratios = (0.8, 0.2, 0.0)
+                train_dataset = ManifestDataset(
+                    data_dir=args.user_dir,
+                    subset='train',
+                    split_ratios=fallback_ratios,
+                    seed=seed,
+                    augment=args.augment,
+                    augment_strength=args.augment_strength
+                )
+                val_dataset = ManifestDataset(
+                    data_dir=args.user_dir,
+                    subset='val',
+                    split_ratios=fallback_ratios,
+                    seed=seed,
+                    augment=False
+                )
+                test_dataset = None
         else:
             logger.error("manifest.json not found - use new dataset format")
             return
@@ -842,6 +1041,7 @@ Examples:
         model=model,
         train_dataset=train_dataset,
         val_dataset=val_dataset,
+        test_dataset=test_dataset,
         output_dir=args.output_dir,
         experiment_name=args.experiment_name,
         learning_rate=args.learning_rate,

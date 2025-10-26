@@ -76,7 +76,7 @@ class ModelTrainer:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=14400  # 4 hours
+                timeout=14400*4  # 4 hours
             )
 
             end_time = datetime.now()
