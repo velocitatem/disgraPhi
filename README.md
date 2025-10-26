@@ -1,26 +1,6 @@
 ![](./banner.png)
 
-# Dysgrafix
-A tool to help people with dysgraphia. WE take a model like Qwen3-VL and create a main fork with a LoRA adapter that we initally train on:
-https://fki.tic.heia-fr.ch/databases/iam-handwriting-database?
+# disgra$$\phi$$
 
-To give it a general ability to use handwritten text and bootstraps the model. (this model we freeze)
+[Dysgraphia](https://www.lexercise.com/dysgraphia) affects between 5-20% of the population with a growing rate of diagnosis. LLMs are already getting much better at reading human writing but often the samples of people with writing issues are under-rerpesented. This project aims to propose a machine learning solution to address this lack of representation and provide a cheap and minimal solution for tailored handwriting OCR.
 
-Then we create a personalization kit:
-A 10–15 minute paper packet the user rewrites and photographs:
-
-8 pangram lines + bigram/number mix + common names/addresses placeholders.
-Printed page has QR corners for de‑skew and line guides; app auto‑crops lines.
-Each line pairs to ground truth you already know; no manual labeling.
-
-Collect 40–120 line‑level pairs per user for LoRA SFT on the VLM's decoder.
-
-
-we need to define an app in streamlit and fastapi for inference and data handling. we create two training directories one for the global boostrap and then one for the fintuning on an individuals writing
-
-
-### Training Examples
-
-```bash
-python ml/models/train.py --output-dir ml/checkpoints/bootstrap_smolvlm256/ --model-type smolvlm-256m
-```
