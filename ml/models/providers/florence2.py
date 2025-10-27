@@ -153,6 +153,9 @@ class Florence2Model(BaseVisionLanguageModel):
         # Enable gradient checkpointing to save memory
         if hasattr(self.base_model, 'gradient_checkpointing_enable'):
             self.base_model.gradient_checkpointing_enable()
+            # Disable cache when using gradient checkpointing
+            if hasattr(self.base_model.config, 'use_cache'):
+                self.base_model.config.use_cache = False
 
         # Configure LoRA
         # Florence-2 uses encoder-decoder architecture, target attention layers

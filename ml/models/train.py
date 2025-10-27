@@ -44,6 +44,9 @@ from peft import LoraConfig, TaskType, get_peft_model, get_peft_model_state_dict
 from ml.data.datasets import IAMDataset, ManifestDataset
 from ml.models.providers import create_model
 from ml.models.eval import compute_ocr_metrics, model_agnostic_loss
+# set   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+import os
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 
 def set_seed(seed: int = 2025):
@@ -295,9 +298,9 @@ def main():
     parser.add_argument("--experiment_name", type=str, default=None,
                         help="Experiment name (auto-generated if not provided: task.model.size.dataset.precision)")
     parser.add_argument("--num_train_epochs", type=int, default=3, help="Number of training epochs")
-    parser.add_argument("--per_device_train_batch_size", type=int, default=4,
+    parser.add_argument("--per_device_train_batch_size", type=int, default=1,
                         help="Training batch size per device")
-    parser.add_argument("--per_device_eval_batch_size", type=int, default=8,
+    parser.add_argument("--per_device_eval_batch_size", type=int, default=4,
                         help="Evaluation batch size per device")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=4,
                         help="Gradient accumulation steps")

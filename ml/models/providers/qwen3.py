@@ -120,6 +120,9 @@ class Qwen3VLModel(BaseVisionLanguageModel):
 
         # Enable gradient checkpointing to save memory
         self.base_model.gradient_checkpointing_enable()
+        # Disable cache when using gradient checkpointing
+        if hasattr(self.base_model.config, 'use_cache'):
+            self.base_model.config.use_cache = False
 
         # Configure LoRA
         lora_config = LoraConfig(
