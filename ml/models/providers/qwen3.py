@@ -30,9 +30,9 @@ from peft import (
 )
 
 from .base import BaseVisionLanguageModel
-from alveslib import logger
+from alveslib import get_logger
 
-logger = logger.get_logger(__name__)
+logger = get_logger(__name__)
 
 
 # Model name mapping

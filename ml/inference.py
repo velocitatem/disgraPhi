@@ -31,7 +31,7 @@ import asyncio
 from PIL import Image
 from alveslib import get_logger, post_process_inference
 
-from ml.models.providers import create_model, MODEL_REGISTRY, BaseVisionLanguageModel
+from ml.models.providers import create_model
 
 
 logger = get_logger("ml-inference")
@@ -49,6 +49,7 @@ if ADAPTER_PATH is None:
     )
 MODEL_NAME = os.getenv("ML_MODEL_NAME", "smolvlm-256m")
 DEVICE = os.getenv("ML_DEVICE", "auto")
+DEVICE = "cpu"
 
 logger.info(f"Loading adapter from: {ADAPTER_PATH}")
 logger.info(f"Device: {DEVICE}")
@@ -144,7 +145,7 @@ class InferenceModel:
         logger.info(f"Initializing model on device: {self.device}")
 
         # Load model with adapter
-        self.model = create_model('smolvlm-256m')
+        self.model = create_model(model_name)
         # Load LoRA adapter
         logger.info(f"Loading adapter from: {adapter_path}")
         self.model.load_adapter(adapter_path)

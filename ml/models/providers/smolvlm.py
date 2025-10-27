@@ -18,6 +18,7 @@ import torch.nn as nn
 from typing import Optional, Dict, Any, Union
 from pathlib import Path
 from PIL import Image
+import os
 from transformers import (
     AutoProcessor,
     AutoModelForVision2Seq,
@@ -34,6 +35,7 @@ from .base import BaseVisionLanguageModel
 from alveslib import get_logger
 
 logger = get_logger(__name__)
+logger.setLevel(os.getenv("DISGRAPHI_LOGLEVEL", "ERROR").upper()) # DEBUG, INFO, WARNING, ERROR
 
 
 
@@ -150,24 +152,29 @@ class SmolVLMModel(BaseVisionLanguageModel):
         # Load bootstrap adapter if provided (for personalization mode)
         if bootstrap_adapter_path:
             print(f"Loading bootstrap adapter from {bootstrap_adapter_path}...")
-            # First load the bootstrap adapter as base
-            self.model = PeftModel.from_pretrained(
+
+            # Strategy: Merge bootstrap into base, then add trainable personalization
+            # This avoids adapter switching issues
+            print("Loading bootstrap adapter...")
+            bootstrap_model = PeftModel.from_pretrained(
                 self.base_model,
                 bootstrap_adapter_path,
-                is_trainable=False,  # Freeze bootstrap adapter
-                adapter_name="bootstrap"
+                is_trainable=False
             )
 
-            # Now add a new trainable adapter on top for personalization
-            print("Adding new trainable personalization adapter...")
-            self.model.add_adapter("personalization", lora_config)
-            self.model.set_adapter("personalization")  # Set as active adapter
+            print("Merging bootstrap adapter into base model...")
+            # Merge bootstrap into the base model permanently
+            self.base_model = bootstrap_model.merge_and_unload()
 
-            # Ensure bootstrap adapter is frozen and personalization is trainable
+            print("Adding trainable personalization adapter on top of merged bootstrap...")
+            # Now add personalization LoRA on top of (base + bootstrap)
+            self.model = get_peft_model(self.base_model, lora_config)
+
+            print("✓ Architecture: base_model + merged_bootstrap + trainable_personalization")
+
+            # All personalization params should be trainable
             for name, param in self.model.named_parameters():
-                if "bootstrap" in name:
-                    param.requires_grad = False
-                elif "personalization" in name:
+                if "lora" in name.lower():
                     param.requires_grad = True
         else:
             # Bootstrap training: just apply LoRA
@@ -290,7 +297,9 @@ class SmolVLMModel(BaseVisionLanguageModel):
                 max_new_tokens=max_new_tokens,
                 temperature=temperature if do_sample else None,
                 top_p=top_p if do_sample else None,
-                do_sample=do_sample
+                do_sample=do_sample,
+                repetition_penalty=1.2,  # Penalize repetitions
+                no_repeat_ngram_size=3   # Prevent 3-gram repetitions
             )
 
         # Clear cache
@@ -440,6 +449,7 @@ class SmolVLMModel(BaseVisionLanguageModel):
 
         return {
             'pixel_values': inputs['pixel_values'],
+            'pixel_attention_mask': inputs.get('pixel_attention_mask'),
             'image_grid_thw': inputs.get('image_grid_thw'),
             'input_ids': inputs['input_ids'],
             'attention_mask': inputs['attention_mask'],
