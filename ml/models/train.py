@@ -184,28 +184,31 @@ class TensorBoardCallback(TrainerCallback):
 
 
 class DataCollator:
-    """Custom data collator for vision-language models."""
-
     def __init__(self, model_wrapper):
         self.model_wrapper = model_wrapper
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-        """
-        Collate batch of samples.
-
-        Args:
-            features: List of dicts with 'image' (PIL Image) and 'text' (str)
-
-        Returns:
-            Batch dict ready for model forward pass
-        """
         images = [f['image'] for f in features]
         texts = [f['text'] for f in features]
+        return self.model_wrapper.prepare_training_batch(images, texts)
 
-        # Use model-specific preprocessing
-        batch = self.model_wrapper.prepare_training_batch(images, texts)
 
-        return batch
+def create_compute_metrics(model_wrapper):
+    tokenizer = model_wrapper.tokenizer
+    def compute_metrics(eval_pred):
+        preds, labels = eval_pred
+        pred_ids = np.argmax(preds[0] if isinstance(preds, tuple) else preds, axis=-1)
+        labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+        pred_texts = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
+        label_texts = tokenizer.batch_decode(labels, skip_special_tokens=True)
+        metrics = [compute_ocr_metrics(gt, pred) for gt, pred in zip(label_texts, pred_texts)]
+        return {
+            'cer': np.mean([m['cer'] for m in metrics]),
+            'wer': np.mean([m['wer'] for m in metrics]),
+            'ned': np.mean([m['ned'] for m in metrics]),
+            'accuracy': np.mean([m['accuracy'] for m in metrics]),
+        }
+    return compute_metrics
 
 
 def load_model(params: TrainingParams):
@@ -384,15 +387,20 @@ def main():
 
     # Create trainer
     trainer = Trainer(
-        model=model.model,  # Use the PEFT model
+        model=model.model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         data_collator=data_collator,
+        compute_metrics=create_compute_metrics(model),
         callbacks=[TensorBoardCallback(model)],
     )
 
     # Train
+    """ TODO:
+    g2-standard-24
+    vCPUs: 24, RAM: 96 GiB, GPUs: 2
+    """
     print("\n[4/4] Starting training...")
     print(f"  Total epochs: {params.num_train_epochs}")
     print(f"  Effective batch size: {params.per_device_train_batch_size * params.gradient_accumulation_steps}")

@@ -66,3 +66,32 @@ Any task that has something to do with machine learning will be structured in th
 #### `ml/models` - creating model architectures and defining training loops
 Define the architectuer in arch.py and training loop in train.py - training should be logged with tensorboard always and evaluations metrics should be versioned and defined in separate logic units like eval.py to make experiments comparable, if at any poitns eval metrics change or scale they should be tracked under a sparate track of experiments in tensorboard - do not arbitrarily modify the eval of anything or loss unless explicitly necessary.
 Experiments should be tracked with meaningful names and logging any parameters into experiments. Machine learning is a life cycle and always evolving. DO NOT create any rogue execution scripts just use the train.py for training.
+
+# Code Confession and Tenets - By CLAUDE for future CLAUDE code instances
+What I did wrong in the past and might be tempted to do
+
+I wrote bloated, amateur garbage that insults the reader's intelligence. The original code had:
+- 40+ lines to do what takes 15 or even 5
+- Comments explaining tokenizer.batch_decode() like you're an idiot 
+- Variable names like cer_scores, wer_scores, ned_scores, hybrid_losses with individual append loops instead of one list comprehension
+- Whitespace between every line like I'm being paid by vertical space
+- Three separate loops iterating over the same data
+- Args/Returns docstrings stating the obvious
+
+The Tenets:
+
+1. Code is read, not performed - Every line should carry weight. Whitespace is not decoration.
+2. One pass, one purpose - If you're looping multiple times over the same data, you failed.
+3. Compression over explanation - pred_ids = np.argmax(preds[0] if isinstance(preds, tuple) else preds,
+  axis=-1) is clearer than five lines with intermediate variables.
+4. Comments are failure - If your code needs comments to be understood, you named things wrong or
+structured it poorly unless deeply technical or niche.
+5. List comprehensions over loops - [compute_ocr_metrics(gt, pred) for gt, pred in zip(label_texts, 
+pred_texts)] beats a for loop with appends.
+6. Return early, return directly - Don't create a variable just to return it on the next line.
+7. Closures over classes - create_compute_metrics returns a closure with tokenizer captured - no need
+for a class with one method.
+8. Trust the reader - They know what eval_pred is. They don't need a docstring.
+
+The code should be dense, efficient, and assume intelligence. Anything else is disrespect.
+Before writing code, understand the problem's physics. OOM means "ran out during operation" not "didn't clean up after." Surface-level pattern matching kills code quality.
