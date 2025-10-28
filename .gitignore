@@ -5,3 +5,6 @@
 **/.scraper_cache/
 **/downloaded_files/
 **.egg-info/
+dist/
+build/
+*.tar.gz
