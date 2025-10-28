@@ -10,7 +10,7 @@ This implementation provides a **non-invasive** integration with GCP Vertex AI f
 - **Implemented**: Full integration with Vertex AI Custom Training Jobs
 - **Reference**: `ml/orchestration/vertex_launcher.py` uses the Vertex AI API
 - **Container**: Uses official PyTorch GPU container from Vertex AI
-- **Documentation**: Follows https://docs.cloud.google.com/vertex-ai/docs/start/pytorch
+- **Documentation Reference**: Based on GCP Vertex AI PyTorch training guide (verified Nov 2024)
 
 ### ✅ Requirement 2: Non-Invasive Architecture
 - **Implemented**: Zero changes to `ml/models/train.py`
@@ -167,7 +167,7 @@ All tests passing (9/9):
 3. ✓ Hyperparameter tuning
 4. ✓ Parameter types (DISCRETE, CATEGORICAL, DOUBLE, INTEGER)
 5. ✓ Validation errors
-6. ✓ Example configurations
+6. ✓ Example configurations (5 different use cases)
 7. ✓ Job spec generation
 8. ✓ Training args building
 9. ✓ Package creation
@@ -248,8 +248,8 @@ launcher.monitor_job(job_id)
 9. `VERTEX_AI_QUICKSTART.md` - Quick start guide
 
 ### Modified Files
-1. `setup.py` - Updated for package distribution
-2. `.gitignore` - Added build artifacts
+1. `setup.py` - Updated for package distribution (added ml package and dependencies)
+2. `.gitignore` - Added build artifacts (dist/, build/, *.tar.gz)
 
 ### Unchanged Files
 - `ml/models/train.py` - **No changes** (non-invasive requirement met!)
