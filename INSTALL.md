@@ -223,9 +223,9 @@ If you encounter issues:
 After installation:
 
 - **Try Colab**: [DisgraPhi_Personalization.ipynb](https://colab.research.google.com/github/velocitatem/disgraPhi/blob/main/DisgraPhi_Personalization.ipynb)
-- **Read docs**: [Data Pipeline](ml/data/README.md)
+- **Collect data**: Run `python apps/webapp-minimal/app.py` for guided data collection
 - **Train locally**: `disgraphi-train --help`
-- **Generate packets**: `disgraphi-data generate-packet --help`
+- **Read docs**: [Colab Guide](COLAB_GUIDE.md)
 
 ## Updating
 

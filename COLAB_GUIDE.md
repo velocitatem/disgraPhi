@@ -41,7 +41,7 @@ Click the badge above to open the notebook directly in Google Colab.
 
 #### Option 3: Pro (Maximum Accuracy)
 - 100+ samples
-- Use the packet generator (see below)
+- Use the Gradio data collector (see below)
 - Professional-grade personalization
 
 ## Preparing Your Handwriting Samples
@@ -52,9 +52,9 @@ Click the badge above to open the notebook directly in Google Colab.
 3. One line per image works best
 4. Clear lighting, no shadows
 
-### Method 2: Generate Practice Packet (Recommended)
+### Method 2: Gradio Data Collector (Recommended)
 
-For best results, use our packet generator to create structured practice sheets:
+For best results, use our interactive Gradio webapp for guided data collection:
 
 ```bash
 # Clone the repository
@@ -62,26 +62,33 @@ git clone https://github.com/velocitatem/disgraPhi.git
 cd disgraPhi
 
 # Install dependencies
-pip install -r requirements.txt
+pip install gradio>=4.0 gradio_image_annotation>=0.4 pillow
 
-# Generate practice packet
-python ml/data/data.py generate-packet \
-    --user-id your_name \
-    --output practice_packet.pdf
+# Run the data collector
+python apps/webapp-minimal/app.py
 ```
 
-This creates a PDF with:
-- Pangrams (sentences using all letters)
-- Common bigrams (letter pairs)
-- Numbers and dates
-- Practice lines with guides
-- QR codes for automatic alignment
+This launches an interactive webapp that:
+- Prompts you with 10 practice sentences (pangrams, numbers, symbols)
+- Lets you photograph each sentence with your phone or webcam
+- Guides you to annotate the handwriting region with a bounding box
+- Automatically crops and packages your data
+- Exports a ready-to-use ZIP file with images and annotations
+
+**Why this is better:**
+- ✅ No printing or scanning needed
+- ✅ Interactive guidance with visual feedback
+- ✅ Automatic cropping and alignment
+- ✅ Immediate quality validation
+- ✅ Works on any device with a camera
 
 **Steps:**
-1. Print the generated PDF
-2. Fill it out with your normal handwriting
-3. Take photos of each page
-4. Use the packet processor (optional) or upload directly to Colab
+1. Run the Gradio app (opens in browser)
+2. Write each prompted sentence on paper
+3. Photograph it using the webapp interface
+4. Draw a bounding box around the text
+5. Download the generated ZIP file
+6. Extract and use in Colab or local training
 
 ### Method 3: Quick Handwriting Samples
 
@@ -248,7 +255,7 @@ API will be available at `http://localhost:8000`
 - Ensure samples match your target handwriting style
 - Check that labels are accurate
 - Add more samples
-- Consider using the packet generator for structured data
+- Consider using the Gradio data collector for structured, high-quality samples
 
 ## Advanced Usage
 

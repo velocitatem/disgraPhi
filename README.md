@@ -100,24 +100,27 @@ The system uses LoRA (Low-Rank Adaptation) for efficient fine-tuning, allowing p
 
 Just click the badge at the top and follow the interactive notebook!
 
+### Collect Data with Gradio Webapp
+
+```bash
+# Run interactive data collector
+python apps/webapp-minimal/app.py
+
+# Opens a webapp that:
+# - Prompts you with practice sentences
+# - Captures photos from webcam or uploads
+# - Guides bounding box annotation
+# - Exports ready-to-use dataset ZIP
+```
+
 ### Train Locally
 
 ```bash
-# Generate practice packet
-disgraphi-data generate-packet --user-id alice --output packet.pdf
-
-# (Print, fill out, photograph)
-
-# Process photos
-disgraphi-data process-packet \
-    --user-id alice \
-    --images page1.jpg page2.jpg \
-    --ground-truth packet_ground_truth.json
-
+# After collecting data with Gradio webapp or manually
 # Train personalized model
 disgraphi-train \
     --dataset_type manifest \
-    --manifest_data_dir ml/data/users/alice \
+    --manifest_data_dir path/to/your/dataset \
     --model_provider smolvlm-256m \
     --num_train_epochs 5 \
     --output_dir ./models

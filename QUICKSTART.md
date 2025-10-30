@@ -55,19 +55,28 @@ See [INSTALL.md](INSTALL.md) for platform-specific instructions.
 #### Using Colab
 Just click the badge above and follow the interactive notebook!
 
-#### Using CLI
+#### Using Gradio Data Collector (Recommended)
 ```bash
-# Generate practice packet
-disgraphi-data generate-packet --user-id alice --output packet.pdf
+# Run interactive data collection webapp
+python apps/webapp-minimal/app.py
 
-# (Print, fill out, and photograph)
+# This will:
+# 1. Open a webapp in your browser
+# 2. Prompt you to write and photograph 10 sentences
+# 3. Guide you to annotate each sample
+# 4. Export a ready-to-use dataset ZIP
 
-# Process photos
-disgraphi-data process-packet \
-    --user-id alice \
-    --images page1.jpg page2.jpg \
-    --ground-truth packet_ground_truth.json
+# Then train with the collected data
+disgraphi-train \
+    --dataset_type manifest \
+    --manifest_data_dir path/to/extracted/dataset \
+    --num_train_epochs 5 \
+    --output_dir ./models
+```
 
+#### Using CLI (Advanced)
+```bash
+# If you have pre-labeled images in manifest format
 # Train personalized model
 disgraphi-train \
     --dataset_type manifest \
@@ -132,10 +141,10 @@ After getting started:
 1. **Read the docs**: 
    - [Colab Guide](COLAB_GUIDE.md) - Detailed Colab instructions
    - [Installation](INSTALL.md) - Local setup
-   - [Data Pipeline](ml/data/README.md) - Data preparation
+   - [Gradio Data Collector](apps/webapp-minimal/app.py) - Interactive data collection
 
 2. **Try advanced features**:
-   - Use packet generator for structured data
+   - Use Gradio webapp for high-quality structured data collection
    - Experiment with different models (qwen3-vl-2b, florence2-base)
    - Deploy as production API
    - Monitor training with TensorBoard
