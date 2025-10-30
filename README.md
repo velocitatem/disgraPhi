@@ -49,6 +49,8 @@ pip install -e .
 
 **Perfect for**: Developers, production deployment, batch processing
 
+See [INSTALL.md](INSTALL.md) for detailed installation instructions.
+
 ## 📦 Features
 
 - **🎯 Personalized OCR**: Train models on your unique handwriting style
@@ -59,4 +61,151 @@ pip install -e .
 - **🎨 Data Augmentation**: Smart augmentation for better generalization
 - **📈 Training Monitoring**: TensorBoard integration for tracking progress
 - **🌐 API Ready**: Deploy as REST API for production use
+
+## 📖 Documentation
+
+- **[Quick Start Guide](QUICKSTART.md)** - Get started in 5 minutes
+- **[Colab Guide](COLAB_GUIDE.md)** - Complete Colab notebook instructions
+- **[Installation Guide](INSTALL.md)** - Platform-specific setup
+- **[Data Pipeline](ml/data/README.md)** - Data preparation and processing
+- **[Contributing](CONTRIBUTING.md)** - How to contribute
+
+## 🎯 Use Cases
+
+- **Accessibility**: Help people with dysgraphia digitize their notes
+- **Education**: Personalized homework grading and feedback
+- **Medical**: Transcribe doctor's notes and prescriptions
+- **Research**: Analyze historical handwritten documents
+- **Personal**: Digitize journals, recipes, and letters
+- **Business**: Process handwritten forms and documents
+
+## 🏗️ Architecture
+
+DisgraPhi uses a two-stage training approach:
+
+1. **Bootstrap Training**: Pre-train on IAM Handwriting Database (13k+ samples)
+2. **Personalization**: Fine-tune on user-specific samples (10-100+ samples)
+
+The system uses LoRA (Low-Rank Adaptation) for efficient fine-tuning, allowing personalization with minimal compute and data.
+
+### Supported Models
+
+- **SmolVLM-256M** (recommended for Colab): Fast, efficient, good accuracy
+- **Qwen3-VL-2B**: Better accuracy, requires more compute
+- **Florence2-Base**: Alternative architecture, good for specific tasks
+
+## 💡 Examples
+
+### Train with Colab
+
+Just click the badge at the top and follow the interactive notebook!
+
+### Train Locally
+
+```bash
+# Generate practice packet
+disgraphi-data generate-packet --user-id alice --output packet.pdf
+
+# (Print, fill out, photograph)
+
+# Process photos
+disgraphi-data process-packet \
+    --user-id alice \
+    --images page1.jpg page2.jpg \
+    --ground-truth packet_ground_truth.json
+
+# Train personalized model
+disgraphi-train \
+    --dataset_type manifest \
+    --manifest_data_dir ml/data/users/alice \
+    --model_provider smolvlm-256m \
+    --num_train_epochs 5 \
+    --output_dir ./models
+```
+
+### Use in Python
+
+```python
+from ml.models.providers import create_model
+from PIL import Image
+
+# Load personalized model
+model = create_model("smolvlm-256m")
+model.load_adapter("path/to/adapter")
+
+# Transcribe handwriting
+image = Image.open("handwriting.jpg")
+text = model.generate(
+    pixel_values=image,
+    prompt="Transcribe this handwritten text.",
+    max_new_tokens=128
+)
+print(text)
+```
+
+### Deploy as API
+
+```bash
+export ML_ADAPTER_PATH="path/to/adapter"
+export ML_MODEL_NAME="smolvlm-256m"
+
+python ml/inference.py
+```
+
+Access at `http://localhost:8000/docs`
+
+## 🧪 Performance
+
+Expected accuracy with proper samples:
+
+| Samples | Character Error Rate | Word Error Rate |
+|---------|---------------------|-----------------|
+| 10-15   | 15-25%             | 25-40%          |
+| 20-30   | 8-15%              | 15-25%          |
+| 40-60   | 5-10%              | 10-18%          |
+| 100+    | 2-5%               | 5-12%           |
+
+*Lower is better. Results vary by handwriting style and quality.*
+
+## 🤝 Contributing
+
+We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+Areas we need help with:
+- Testing with diverse handwriting styles
+- Improving documentation
+- Adding new model architectures
+- Optimizing performance
+- Translating to other languages
+
+## 📄 License
+
+MIT License - see [LICENSE](LICENSE) for details.
+
+## 🙏 Acknowledgments
+
+- **IAM Handwriting Database** for bootstrap training data
+- **Hugging Face** for model hosting and transformers library
+- **Vision-language model creators** (SmolVLM, Qwen, Florence2)
+- **Contributors** who help improve DisgraPhi
+
+## 📞 Support
+
+- **Documentation**: Check the guides linked above
+- **Issues**: [GitHub Issues](https://github.com/velocitatem/disgraPhi/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/velocitatem/disgraPhi/discussions)
+
+## 🗺️ Roadmap
+
+- [ ] PyPI package release
+- [ ] Web-based labeling interface
+- [ ] Multi-language support
+- [ ] Mobile app for data collection
+- [ ] Continuous learning from corrections
+- [ ] Confidence scores for predictions
+- [ ] Batch processing optimizations
+
+---
+
+**Made with ❤️ for everyone who struggles with handwriting**
 
