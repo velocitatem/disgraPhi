@@ -5,3 +5,36 @@
 **/.scraper_cache/
 **/downloaded_files/
 **.egg-info/
+
+# Build artifacts
+dist/
+build/
+*.pyc
+*.pyo
+*.egg
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Model checkpoints (keep local only)
+ml/checkpoints/
+*.pth
+*.bin
+*.safetensors
+
+# Data (don't commit large datasets)
+ml/data/raw/
+ml/data/users/
