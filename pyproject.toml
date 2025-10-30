@@ -1,0 +1,115 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "disgraphi"
+version = "0.1.0"
+description = "Personalized handwriting recognition for everyone"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "velocitatem", email = "github@velocitatem.com"}
+]
+keywords = ["handwriting", "ocr", "machine-learning", "vision-language", "accessibility"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+]
+
+dependencies = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "transformers>=4.35.0",
+    "accelerate>=0.24.0",
+    "peft>=0.7.0",
+    "bitsandbytes>=0.41.0",
+    "Pillow>=10.0.0",
+    "opencv-python>=4.8.0",
+    "numpy>=1.24.0",
+    "pandas>=2.0.0",
+    "tqdm>=4.66.0",
+    "requests>=2.31.0",
+    "huggingface_hub>=0.19.0",
+    "python-logging-loki>=0.3.1",
+    "python-dotenv>=1.0.0",
+    "pyzbar>=0.1.9",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=4.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "black>=23.0.0",
+    "flake8>=6.0.0",
+    "mypy>=1.5.0",
+]
+inference = [
+    "fastapi>=0.104.0",
+    "uvicorn>=0.24.0",
+]
+webapp = [
+    "streamlit>=1.28.0",
+    "flask>=3.0.0",
+]
+notebooks = [
+    "jupyter>=1.0.0",
+    "ipywidgets>=8.1.0",
+    "matplotlib>=3.8.0",
+]
+all = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "fastapi>=0.104.0",
+    "uvicorn>=0.24.0",
+    "streamlit>=1.28.0",
+    "flask>=3.0.0",
+    "jupyter>=1.0.0",
+    "ipywidgets>=8.1.0",
+    "matplotlib>=3.8.0",
+]
+
+[project.scripts]
+disgraphi-train = "ml.models.train:main"
+disgraphi-data = "ml.data.data:main"
+
+[project.urls]
+Homepage = "https://github.com/velocitatem/disgraPhi"
+Documentation = "https://github.com/velocitatem/disgraPhi#readme"
+Repository = "https://github.com/velocitatem/disgraPhi"
+Issues = "https://github.com/velocitatem/disgraPhi/issues"
+Colab = "https://colab.research.google.com/github/velocitatem/disgraPhi/blob/main/DisgraPhi_Personalization.ipynb"
+
+[tool.setuptools]
+packages = ["ml", "ml.models", "ml.models.providers", "ml.data", "alveslib"]
+
+[tool.setuptools.package-data]
+ml = ["*.txt", "*.md"]
+
+[tool.black]
+line-length = 100
+target-version = ['py310', 'py311', 'py312']
+include = '\.pyi?$'
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false

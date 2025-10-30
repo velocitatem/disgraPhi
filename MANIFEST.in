@@ -1,0 +1,26 @@
+include README.md
+include LICENSE
+include COLAB_GUIDE.md
+include DisgraPhi_Personalization.ipynb
+include requirements.txt
+include pyproject.toml
+include setup.py
+include Makefile
+
+recursive-include ml *.py
+recursive-include alveslib *.py
+recursive-include ml/data *.txt *.md
+
+exclude .gitignore
+exclude .env.example
+exclude docker-compose.yml
+exclude banner.png
+exclude CLAUDE.md
+
+recursive-exclude apps *
+recursive-exclude docker *
+recursive-exclude tests *
+recursive-exclude .git *
+recursive-exclude __pycache__ *
+recursive-exclude *.pyc *
+recursive-exclude *.pyo *
