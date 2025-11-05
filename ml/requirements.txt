@@ -15,7 +15,7 @@ pyzbar
 beautifulsoup4
 lxml
 peft
-transformers>=4.40.0,<4.45.0
+transformers>=4.45.0
 accelerate
 addict
 matplotlib
