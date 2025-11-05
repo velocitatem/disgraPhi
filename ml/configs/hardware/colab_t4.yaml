@@ -1,0 +1,34 @@
+# Hardware configuration for Google Colab T4 (16GB VRAM)
+# Optimization level: balanced
+
+hardware:
+  device: cuda
+  vram_gb: 16
+  optimization: balanced
+
+model:
+  quantization: 4bit  # Recommended for free tier
+  lora:
+    r: 16
+    alpha: 32
+    dropout: 0.05
+
+training:
+  per_device_train_batch_size: 2
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 4
+  bf16: true
+  fp16: false
+
+memory:
+  use_liger_kernel: true
+  use_packing: false
+  gradient_checkpointing: true
+  activation_offloading: false
+  optim: adamw_8bit
+
+# Colab-specific settings
+colab:
+  checkpoint_to_drive: true
+  checkpoint_frequency: 500
+  auto_resume: true

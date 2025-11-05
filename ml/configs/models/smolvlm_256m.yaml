@@ -1,0 +1,32 @@
+# SmolVLM-256M model configuration
+# Smallest VLM in the world, optimized for on-device deployment
+
+model:
+  provider: smolvlm-256m
+  size_gb: 0.5  # BF16 full precision
+  size_gb_4bit: 0.2
+  size_gb_8bit: 0.25
+
+  features:
+    - Ultra-lightweight
+    - Fast inference
+    - Low memory footprint
+    - On-device capable
+
+  recommended_for:
+    - Edge deployment
+    - Mobile devices
+    - Fast prototyping
+    - Limited VRAM scenarios
+
+  lora:
+    r: 8
+    alpha: 16
+    dropout: 0.05
+    finetune_vision_layers: false
+    finetune_language_layers: true
+
+  training:
+    recommended_batch_size: 4
+    max_seq_length: 512
+    recommended_samples_personalization: 50

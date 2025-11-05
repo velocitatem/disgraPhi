@@ -3,6 +3,7 @@ Model Providers for DisgraPhi
 pip install einops timm
 
 Unified interface for different vision-language models:
+- DeepSeek-OCR (3B, optimized for OCR and handwriting)
 - Qwen3-VL (2B/4B/7B)
 - SmolVLM (256M/500M/2.2B)
 - Florence-2 (Base/Large/Base-FT/Large-FT)
@@ -12,12 +13,17 @@ Each provider exposes the same interface for training and inference.
 """
 
 from .base import BaseVisionLanguageModel
+from .deepseek_ocr import DeepSeekOCRModel
 from .qwen3 import Qwen3VLModel
 from .smolvlm import SmolVLMModel
 from .florence2 import Florence2Model
 
 # Model registry for easy instantiation
 MODEL_REGISTRY = {
+    'deepseek-ocr': DeepSeekOCRModel,
+    'deepseek-ocr-tiny': DeepSeekOCRModel,
+    'deepseek-ocr-base': DeepSeekOCRModel,
+    'deepseek-ocr-large': DeepSeekOCRModel,
     'qwen3-vl-2b': Qwen3VLModel,
     'qwen3-vl-4b': Qwen3VLModel,
     'qwen3-vl-7b': Qwen3VLModel,
@@ -62,6 +68,7 @@ def create_model(
 
 __all__ = [
     'BaseVisionLanguageModel',
+    'DeepSeekOCRModel',
     'Qwen3VLModel',
     'SmolVLMModel',
     'Florence2Model',

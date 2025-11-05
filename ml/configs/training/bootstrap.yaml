@@ -1,0 +1,28 @@
+# Bootstrap training configuration
+# Train general handwriting adapter on IAM dataset
+
+training:
+  mode: bootstrap
+  dataset: iam
+  sample_ratio: 1.0  # Use full dataset
+
+  epochs: 3
+  learning_rate: 2.0e-4
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  max_grad_norm: 1.0
+
+  logging_steps: 10
+  eval_steps: 100
+  save_steps: 500
+  save_total_limit: 3
+
+  metric_for_best_model: eval_loss
+  greater_is_better: false
+  load_best_model_at_end: true
+
+  seed: 2025
+
+dataset:
+  augmentation: false  # Not needed for large dataset
+  augmentation_strength: 0.0

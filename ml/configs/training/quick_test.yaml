@@ -1,0 +1,28 @@
+# Quick test configuration
+# Fast iteration for debugging and development
+
+training:
+  mode: bootstrap
+  dataset: iam
+  sample_ratio: 0.1  # 10% of dataset
+
+  epochs: 1  # Single epoch
+  learning_rate: 2.0e-4
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  max_grad_norm: 1.0
+
+  logging_steps: 5
+  eval_steps: 20
+  save_steps: 100
+  save_total_limit: 1
+
+  metric_for_best_model: eval_loss
+  greater_is_better: false
+  load_best_model_at_end: false  # Skip for speed
+
+  seed: 2025
+
+dataset:
+  augmentation: false
+  augmentation_strength: 0.0

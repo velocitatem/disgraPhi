@@ -19,3 +19,11 @@ transformers
 accelerate
 urllib3
 huggingface_hub
+trl>=0.9.0
+liger-kernel
+bitsandbytes
+datasets
+tensorboard
+einops
+timm
+scipy

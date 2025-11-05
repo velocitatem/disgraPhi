@@ -1,0 +1,62 @@
+# Preset: Bootstrap training DeepSeek-OCR on 12GB laptop GPU
+# Complete configuration combining hardware + model + training
+
+# Hardware: 12GB GPU (RTX 4080 Laptop, RTX 3060, etc.)
+hardware:
+  device: cuda
+  vram_gb: 12
+  optimization: aggressive
+
+# Model: DeepSeek-OCR (3B parameters, OCR-optimized)
+model:
+  provider: deepseek-ocr
+  quantization: 4bit
+  lora:
+    r: 16
+    alpha: 32
+    dropout: 0.05
+    finetune_vision_layers: false
+    finetune_language_layers: true
+
+# Training: Bootstrap on IAM dataset
+training:
+  mode: bootstrap
+  dataset: iam
+  data_dir: ./ml/data/raw/iam
+  sample_ratio: 1.0
+
+  num_train_epochs: 3
+  per_device_train_batch_size: 2
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 4
+  learning_rate: 2.0e-4
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  max_grad_norm: 1.0
+
+  logging_steps: 10
+  eval_steps: 100
+  save_steps: 500
+  save_total_limit: 3
+
+  bf16: true
+  fp16: false
+  seed: 2025
+
+# Memory optimizations
+memory:
+  use_liger_kernel: true
+  use_packing: false
+  gradient_checkpointing: true
+  activation_offloading: false
+  optim: adamw_8bit
+
+# Dataset
+dataset:
+  augmentation: false
+  augmentation_strength: 0.0
+
+# Output
+output:
+  output_dir: ./ml/checkpoints
+  experiment_name: null  # Auto-generated

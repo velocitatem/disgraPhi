@@ -1,0 +1,62 @@
+# Preset: Bootstrap training DeepSeek-OCR on Google Colab T4 (free tier)
+# Optimized for 16GB T4 GPU with Drive checkpointing
+
+hardware:
+  device: cuda
+  vram_gb: 16
+  optimization: balanced
+
+model:
+  provider: deepseek-ocr
+  quantization: 4bit
+  lora:
+    r: 16
+    alpha: 32
+    dropout: 0.05
+    finetune_vision_layers: false
+    finetune_language_layers: true
+
+training:
+  mode: bootstrap
+  dataset: iam
+  data_dir: /content/drive/MyDrive/disgraphi/data/iam  # Drive path
+  sample_ratio: 1.0
+
+  num_train_epochs: 3
+  per_device_train_batch_size: 3  # Slightly larger batch for 16GB
+  per_device_eval_batch_size: 6
+  gradient_accumulation_steps: 4
+  learning_rate: 2.0e-4
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  max_grad_norm: 1.0
+
+  logging_steps: 10
+  eval_steps: 100
+  save_steps: 500
+  save_total_limit: 2  # Save space
+
+  bf16: true
+  fp16: false
+  seed: 2025
+
+memory:
+  use_liger_kernel: true
+  use_packing: false
+  gradient_checkpointing: true
+  activation_offloading: false
+  optim: adamw_8bit
+
+dataset:
+  augmentation: false
+  augmentation_strength: 0.0
+
+output:
+  output_dir: /content/drive/MyDrive/disgraphi/checkpoints  # Save to Drive
+  experiment_name: null
+
+# Colab-specific
+colab:
+  checkpoint_to_drive: true
+  checkpoint_frequency: 500
+  auto_resume: true

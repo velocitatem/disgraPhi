@@ -1,0 +1,58 @@
+# Preset: Personalization training on 12GB laptop GPU
+# Train user-specific adapter on top of bootstrap
+
+hardware:
+  device: cuda
+  vram_gb: 12
+  optimization: aggressive
+
+model:
+  provider: deepseek-ocr
+  quantization: 4bit
+  lora:
+    r: 16
+    alpha: 32
+    dropout: 0.05
+    finetune_vision_layers: false
+    finetune_language_layers: true
+
+training:
+  mode: personalize
+  dataset: manifest
+  manifest_data_dir: null  # Must be set via CLI
+  bootstrap_adapter_path: null  # Must be set via CLI
+  sample_ratio: 1.0
+
+  num_train_epochs: 2
+  per_device_train_batch_size: 2
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 2  # Faster for small datasets
+  learning_rate: 3.0e-4
+  weight_decay: 0.01
+  warmup_ratio: 0.05
+  max_grad_norm: 1.0
+
+  logging_steps: 5
+  eval_steps: 50
+  save_steps: 100
+  save_total_limit: 2
+
+  bf16: true
+  fp16: false
+  seed: 2025
+
+memory:
+  use_liger_kernel: true
+  use_packing: false
+  gradient_checkpointing: true
+  activation_offloading: false
+  optim: adamw_8bit
+
+dataset:
+  augmentation: true  # Important for small user datasets
+  augmentation_strength: 0.7
+  max_samples: 200
+
+output:
+  output_dir: ./ml/checkpoints
+  experiment_name: null

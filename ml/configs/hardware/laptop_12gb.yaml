@@ -1,0 +1,28 @@
+# Hardware configuration for 12GB GPU (e.g., RTX 4080 Laptop, RTX 3060)
+# Optimization level: aggressive
+
+hardware:
+  device: cuda
+  vram_gb: 12
+  optimization: aggressive
+
+model:
+  quantization: 4bit  # Required for larger models on 12GB
+  lora:
+    r: 16
+    alpha: 32
+    dropout: 0.05
+
+training:
+  per_device_train_batch_size: 2
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 4
+  bf16: true
+  fp16: false
+
+memory:
+  use_liger_kernel: true
+  use_packing: false  # Experimental for VLMs
+  gradient_checkpointing: true
+  activation_offloading: false
+  optim: adamw_8bit

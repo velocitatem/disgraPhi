@@ -1,0 +1,39 @@
+# DeepSeek-OCR model configuration
+# 3B parameters, optimized for OCR and handwriting
+
+model:
+  provider: deepseek-ocr
+  size_gb: 6.0  # BF16 full precision
+  size_gb_4bit: 2.4
+  size_gb_8bit: 3.0
+
+  features:
+    - OCR-optimized
+    - Document-to-markdown
+    - Handwriting recognition
+    - Context optical compression
+
+  recommended_for:
+    - Handwriting recognition
+    - Document OCR
+    - Form processing
+
+  lora:
+    r: 16
+    alpha: 32
+    dropout: 0.05
+    finetune_vision_layers: false
+    finetune_language_layers: true
+    target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - gate_proj
+      - up_proj
+      - down_proj
+
+  training:
+    recommended_batch_size: 2
+    max_seq_length: 1024
+    recommended_samples_personalization: 100

@@ -1,0 +1,30 @@
+# Qwen3-VL-2B model configuration
+# Balanced size and performance
+
+model:
+  provider: qwen3-vl-2b
+  size_gb: 4.0  # BF16 full precision
+  size_gb_4bit: 1.6
+  size_gb_8bit: 2.0
+
+  features:
+    - Strong vision-language understanding
+    - Good accuracy
+    - Moderate size
+
+  recommended_for:
+    - General vision-language tasks
+    - High accuracy requirements
+    - Medium VRAM scenarios
+
+  lora:
+    r: 16
+    alpha: 32
+    dropout: 0.05
+    finetune_vision_layers: false
+    finetune_language_layers: true
+
+  training:
+    recommended_batch_size: 2
+    max_seq_length: 1024
+    recommended_samples_personalization: 100
