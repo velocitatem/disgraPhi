@@ -63,6 +63,7 @@ class DeepSeekOCRModel(BaseVisionLanguageModel):
         device_map: Device mapping strategy
         finetune_vision_layers: Whether to fine-tune vision encoder (default: False)
         finetune_language_layers: Whether to fine-tune language decoder (default: True)
+        attn_implementation: Attention implementation ("eager", "sdpa", or "flash_attention_2")
     """
 
     def __init__(
@@ -76,7 +77,8 @@ class DeepSeekOCRModel(BaseVisionLanguageModel):
         bootstrap_adapter_path: Optional[str] = None,
         device_map: str = "auto",
         finetune_vision_layers: bool = False,
-        finetune_language_layers: bool = True
+        finetune_language_layers: bool = True,
+        attn_implementation: str = "eager"
     ):
         super().__init__()
 
@@ -129,7 +131,8 @@ class DeepSeekOCRModel(BaseVisionLanguageModel):
             torch_dtype=torch.bfloat16 if not (load_in_4bit or load_in_8bit) else None,
             device_map=device_map,
             quantization_config=bnb_config,
-            trust_remote_code=True
+            trust_remote_code=True,
+            attn_implementation=attn_implementation
         )
 
         # Prepare for k-bit training if quantized
