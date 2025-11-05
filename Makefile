@@ -155,4 +155,12 @@ test-augmentation: ## Test augmentation presets
 config-test: ## Test config system
 	python ml/config.py
 
-.PHONY: train-quick-test train-bootstrap train-bootstrap-smol train-personalize benchmark compare-experiments test-augmentation config-test
+fix-deepseek-cache: ## Fix DeepSeek-OCR cached model for transformers 4.45+ compatibility
+	@echo "Patching DeepSeek-OCR cached model code..."
+	@python scripts/patch_deepseek_cache.py
+
+clear-model-cache: ## Clear all cached HuggingFace model code
+	@echo "Clearing HuggingFace model cache..."
+	@bash scripts/clear_deepseek_cache.sh
+
+.PHONY: train-quick-test train-bootstrap train-bootstrap-smol train-personalize benchmark compare-experiments test-augmentation config-test fix-deepseek-cache clear-model-cache
