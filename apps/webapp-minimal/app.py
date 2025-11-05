@@ -1,232 +1,590 @@
 # requirements:
 #   gradio>=4.0
-#   gradio_image_annotation>=0.4
 #   pillow
+#   numpy
 
 import gradio as gr
-from gradio_image_annotation import image_annotator
-from PIL import Image
-import numpy as np, uuid, tempfile, os, json, shutil, datetime as dt
+from PIL import Image, ImageDraw, ImageFont
+import numpy as np
+import uuid
+import tempfile
+import os
+import json
+import shutil
+import datetime as dt
+from pathlib import Path
 
 THEME = gr.themes.Soft(primary_hue="indigo", neutral_hue="slate")
 
-SENTENCES = [
+# Default practice sentences (user can add more)
+DEFAULT_SENTENCES = [
     "The quick brown fox jumps over the lazy dog.",
     "Please write this sentence in your normal handwriting.",
-    "Numbers 0 1 2 3 4 5 6 7 8 9.",
-    "Email: name@example.com",
-    "Address: 221B Baker Street",
-    "I have dysgraphia friendly loops.",
-    "Cursive sample goes here.",
-    "All caps SAMPLE LINE.",
-    "Symbols: @ # $ % & * ( )",
-    "Final line for calibration."
+    "Numbers: 0 1 2 3 4 5 6 7 8 9",
+    "Uppercase: ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    "Lowercase: abcdefghijklmnopqrstuvwxyz",
+    "Email example: name@example.com",
+    "Address: 221B Baker Street, London",
+    "Punctuation: ! @ # $ % ^ & * ( ) - _ = +",
+    "Special chars: [ ] { } | \\ / < > ? .",
+    "Mixed case: The Rain in Spain Falls Mainly on the Plain",
 ]
 
 def _new_session():
+    """Initialize a new data collection session."""
     sid = str(uuid.uuid4())[:8]
-    root = os.path.join(tempfile.gettempdir(), f"disgraf_{sid}")
+    root = os.path.join(tempfile.gettempdir(), f"disgraphi_data_{sid}")
     os.makedirs(os.path.join(root, "images"), exist_ok=True)
-    os.makedirs(os.path.join(root, "crops"), exist_ok=True)
-    return {"sid": sid, "root": root, "i": 0, "items": []}
+    return {
+        "sid": sid,
+        "root": root,
+        "items": [],
+        "current_index": 0
+    }
 
-def _to_pil(img):
-    if isinstance(img, np.ndarray):
-        return Image.fromarray(img)
-    return img  # already PIL
+def _create_manifest(state, split_ratios=(0.8, 0.1, 0.1)):
+    """
+    Create manifest.json in the format expected by DisgraPhi training.
 
+    Format:
+    {
+        "train": [{"image": "path/to/image.png", "text": "ground truth"}],
+        "val": [...],
+        "test": [...]
+    }
+    """
+    items = state["items"]
+    n = len(items)
 
-def _instruction_text(state):
-    idx = state["i"]
-    sentence = SENTENCES[idx]
-    total = len(SENTENCES)
-    return (
-        f"#### Step {idx + 1} of {total}\n"
-        "Capture a clear photo of your handwriting and draw a tight bounding box around **just this sentence**:\n\n"
-        f"> {sentence}"
-    )
+    # Calculate split indices
+    train_end = int(n * split_ratios[0])
+    val_end = train_end + int(n * split_ratios[1])
 
+    manifest = {
+        "train": [],
+        "val": [],
+        "test": []
+    }
 
-def _progress_badge(state):
-    total = len(SENTENCES)
-    current = state["i"]
-    dots = ["[X]" if i < current else ("[-]" if i == current else "[ ]") for i in range(total)]
-    return f"**Progress**  {''.join(dots)}  ({current}/{total} saved)"
+    for idx, item in enumerate(items):
+        entry = {
+            "image": item["image_path"],
+            "text": item["text"]
+        }
 
+        if idx < train_end:
+            manifest["train"].append(entry)
+        elif idx < val_end:
+            manifest["val"].append(entry)
+        else:
+            manifest["test"].append(entry)
 
-def _history_table(state):
-    rows = [
-        [item['index'] + 1, item['text'], item['timestamp']]
-        for item in state["items"]
-    ]
-    return rows
+    return manifest
 
+def _save_drawing(drawing, state, text):
+    """Save a drawing from the canvas."""
+    if drawing is None:
+        return None, "Please draw something first"
 
-def _gallery_items(state):
-    gallery = []
-    for item in state["items"]:
-        crop_path = os.path.join(state["root"], item["crop"])
-        caption = f"#{item['index'] + 1}: {item['text']}"
-        gallery.append((crop_path, caption))
-    return gallery
+    # Convert to PIL Image
+    if isinstance(drawing, dict) and 'composite' in drawing:
+        # Gradio Sketchpad format
+        img = Image.fromarray(drawing['composite'])
+    elif isinstance(drawing, np.ndarray):
+        img = Image.fromarray(drawing)
+    else:
+        img = drawing
 
+    # Convert to grayscale and invert (white background, black text)
+    img = img.convert('L')
+    img = Image.eval(img, lambda x: 255 - x)
 
-def _status(message, level="info"):
-    if not message:
-        return ""
-    icons = {"info": "ℹ️", "success": "✅", "warn": "⚠️", "error": "❌"}
-    return message
+    # Crop to content (remove excess white space)
+    bbox = img.getbbox()
+    if bbox:
+        img = img.crop(bbox)
+        # Add small padding
+        padding = 10
+        padded = Image.new('L', (img.width + padding*2, img.height + padding*2), 255)
+        padded.paste(img, (padding, padding))
+        img = padded
 
+    return img, None
 
-def start():
-    state = _new_session()
-    instruction = _instruction_text(state)
-    progress = _progress_badge(state)
-    return (
-        state,
-        gr.update(value=None),
-        instruction,
-        progress,
-        gr.update(visible=False, value=None),
-        _status("Ready for your first sentence", "info"),
-        _history_table(state),
-        _gallery_items(state),
-    )
+def _save_photo(photo, state, text):
+    """Save an uploaded photo."""
+    if photo is None:
+        return None, "Please upload a photo first"
 
-def save_and_next(ann, state):
-    if not ann or ann.get("image") is None:
+    # Convert to PIL Image
+    if isinstance(photo, np.ndarray):
+        img = Image.fromarray(photo)
+    else:
+        img = photo
+
+    # Convert to RGB
+    img = img.convert('RGB')
+
+    return img, None
+
+def save_sample(input_image, input_text, input_mode, state):
+    """Save a single handwriting sample (drawing or photo)."""
+    if not input_text or not input_text.strip():
         return (
             state,
             gr.update(),
-            _instruction_text(state),
-            _progress_badge(state),
             gr.update(),
-            _status("Upload a photo before saving.", "warn"),
-            _history_table(state),
-            _gallery_items(state),
+            "⚠️ Please enter the text label before saving",
+            _get_gallery(state),
+            _get_stats(state)
         )
-    if not ann.get("boxes"):
+
+    text = input_text.strip()
+
+    # Save based on input mode
+    if input_mode == "draw":
+        img, error = _save_drawing(input_image, state, text)
+    else:  # photo
+        img, error = _save_photo(input_image, state, text)
+
+    if error:
         return (
             state,
             gr.update(),
-            _instruction_text(state),
-            _progress_badge(state),
             gr.update(),
-            _status("Draw a box around the sentence before saving.", "warn"),
-            _history_table(state),
-            _gallery_items(state),
+            f"⚠️ {error}",
+            _get_gallery(state),
+            _get_stats(state)
         )
 
-    img_pil = _to_pil(ann["image"])
-    W, H = img_pil.size
-    box = ann["boxes"][0]
-    xmin, ymin, xmax, ymax = [int(box[k]) for k in ("xmin","ymin","xmax","ymax")]
-    idx = state["i"]; root = state["root"]
+    # Save image
+    idx = len(state["items"])
+    filename = f"sample_{idx:04d}.png"
+    filepath = os.path.join(state["root"], "images", filename)
+    img.save(filepath)
 
-    img_path = os.path.join(root, "images", f"{idx:02d}.png")
-    crop_path = os.path.join(root, "crops",  f"{idx:02d}.png")
-    img_pil.save(img_path)
-    img_pil.crop((xmin, ymin, xmax, ymax)).save(crop_path)
-
+    # Add to state
     state["items"].append({
         "index": idx,
-        "text": SENTENCES[idx],
-        "image": f"images/{idx:02d}.png",
-        "crop":  f"crops/{idx:02d}.png",
-        "bbox_xyxy": [xmin, ymin, xmax, ymax],
-        "image_size_wh": [W, H],
-        "timestamp": dt.datetime.utcnow().isoformat() + "Z"
+        "text": text,
+        "image_path": f"images/{filename}",
+        "timestamp": dt.datetime.utcnow().isoformat() + "Z",
+        "mode": input_mode
     })
-    state["i"] += 1
 
-    if state["i"] >= len(SENTENCES):
-        with open(os.path.join(root, "annotations.jsonl"), "w") as f:
-            for it in state["items"]:
-                f.write(json.dumps(it) + "\n")
-        zip_path = shutil.make_archive(root, "zip", root)
-        return (
-            state,
-            gr.update(value=None),
-            "### Great work!\nAll sentences captured. Download your dataset below.",
-            _progress_badge(state),
-            gr.update(visible=True, value=zip_path),
-            _status("Dataset packaged. You can restart for another user or close the page.", "success"),
-            _history_table(state),
-            _gallery_items(state),
-        )
-    else:
-        instruction = _instruction_text(state)
-        return (
-            state,
-            gr.update(value=None),
-            instruction,
-            _progress_badge(state),
-            gr.update(visible=False, value=None),
-            _status("Sentence saved. Move on to the next one!", "success"),
-            _history_table(state),
-            _gallery_items(state),
-        )
+    # Clear inputs for next sample
+    status = f"✅ Sample {idx + 1} saved: '{text[:50]}{'...' if len(text) > 50 else ''}'"
 
-
-with gr.Blocks(fill_height=True, title="Handwriting Data Collector", theme=THEME) as demo:
-    gr.Markdown(
-        """
-        ## Handwriting Data Collector
-        1. Write the prompted sentence on paper.
-        2. Snap a photo (upload / webcam / paste).
-        3. Draw a tight box around the sentence and press **Save and next**.
-
-        Photos stay on this device; a ZIP with crops & metadata is generated at the end.
-        """
+    return (
+        state,
+        None,  # Clear canvas/photo
+        "",    # Clear text input
+        status,
+        _get_gallery(state),
+        _get_stats(state)
     )
-    state = gr.State()
 
-    with gr.Row(equal_height=True):
-        with gr.Column(scale=1, min_width=280):
-            instruction = gr.Markdown()
-            progress = gr.Markdown(elem_classes="progress-chip")
-            gr.Markdown(
-                """
-                **Tips for crisp captures**
-                - Shoot in good lighting to avoid shadows.
-                - Keep the page flat and the camera parallel.
-                - Draw the box right up to the handwriting edges.
-                """
-            )
-            status = gr.Markdown()
-        with gr.Column(scale=2):
-            annotator = image_annotator(
-                None,
-                label_list=["sentence"],
-                use_default_label=True,
-                single_box=True,
-                disable_edit_boxes=True,
-                sources=["upload", "webcam", "clipboard"],
-                height=480,
-            )
+def use_suggested_text(suggested_text, state):
+    """Use a suggested sentence."""
+    return suggested_text
+
+def add_custom_sentence(custom_sentence, suggested_sentences):
+    """Add a custom sentence to the suggestions."""
+    if not custom_sentence or not custom_sentence.strip():
+        return gr.update(), "⚠️ Please enter a sentence first"
+
+    updated = suggested_sentences + [custom_sentence.strip()]
+    return (
+        gr.update(choices=updated, value=custom_sentence.strip()),
+        f"✅ Added: '{custom_sentence.strip()}'"
+    )
+
+def _get_gallery(state):
+    """Get gallery items for display."""
+    items = []
+    for item in state["items"]:
+        img_path = os.path.join(state["root"], item["image_path"])
+        caption = f"#{item['index'] + 1}: {item['text'][:50]}"
+        items.append((img_path, caption))
+    return items
+
+def _get_stats(state):
+    """Get collection statistics."""
+    n = len(state["items"])
+    if n == 0:
+        return "No samples collected yet"
+
+    draw_count = sum(1 for item in state["items"] if item["mode"] == "draw")
+    photo_count = n - draw_count
+
+    return f"""
+### Collection Statistics
+- **Total Samples**: {n}
+- **Drawn**: {draw_count}
+- **Photographed**: {photo_count}
+- **Train/Val/Test Split**: {int(n*0.8)}/{int(n*0.1)}/{n - int(n*0.8) - int(n*0.1)}
+
+**Recommendation**: Collect 50-200 samples for good personalization results.
+"""
+
+def delete_last(state):
+    """Delete the last saved sample."""
+    if not state["items"]:
+        return (
+            state,
+            "⚠️ No samples to delete",
+            _get_gallery(state),
+            _get_stats(state)
+        )
+
+    # Remove last item
+    item = state["items"].pop()
+
+    # Delete file
+    filepath = os.path.join(state["root"], item["image_path"])
+    if os.path.exists(filepath):
+        os.remove(filepath)
+
+    return (
+        state,
+        f"✅ Deleted sample #{item['index'] + 1}",
+        _get_gallery(state),
+        _get_stats(state)
+    )
+
+def finalize_dataset(state, dataset_name, split_train, split_val):
+    """Create final dataset with manifest.json."""
+    if not state["items"]:
+        return (
+            state,
+            gr.update(visible=False),
+            "⚠️ No samples to package. Collect some samples first!",
+        )
+
+    # Validate split ratios
+    split_test = 100 - split_train - split_val
+    if split_test < 0:
+        return (
+            state,
+            gr.update(visible=False),
+            "⚠️ Split ratios must sum to ≤100%",
+        )
+
+    split_ratios = (split_train/100, split_val/100, split_test/100)
+
+    # Create manifest
+    manifest = _create_manifest(state, split_ratios)
+    manifest_path = os.path.join(state["root"], "manifest.json")
+    with open(manifest_path, 'w') as f:
+        json.dump(manifest, f, indent=2)
+
+    # Save metadata
+    metadata = {
+        "dataset_name": dataset_name or f"handwriting_{state['sid']}",
+        "created": dt.datetime.utcnow().isoformat() + "Z",
+        "total_samples": len(state["items"]),
+        "train_samples": len(manifest["train"]),
+        "val_samples": len(manifest["val"]),
+        "test_samples": len(manifest["test"]),
+        "split_ratios": split_ratios
+    }
+    with open(os.path.join(state["root"], "metadata.json"), 'w') as f:
+        json.dump(metadata, f, indent=2)
+
+    # Create README
+    readme = f"""# {metadata['dataset_name']}
+
+Handwriting dataset for DisgraPhi personalization training.
+
+## Statistics
+- Total samples: {metadata['total_samples']}
+- Train: {metadata['train_samples']}
+- Val: {metadata['val_samples']}
+- Test: {metadata['test_samples']}
+
+## Usage
+
+```bash
+python ml/models/train_trl.py \\
+  --model_provider deepseek-ocr \\
+  --dataset_type manifest \\
+  --manifest_data_dir /path/to/this/dataset \\
+  --bootstrap_adapter_path /path/to/bootstrap/adapter \\
+  --num_train_epochs 2 \\
+  --augment \\
+  --augment_strength 0.7
+```
+
+Or with Makefile:
+
+```bash
+make train-personalize \\
+  MANIFEST_DIR=/path/to/this/dataset \\
+  BOOTSTRAP_ADAPTER=/path/to/bootstrap/adapter
+```
+
+## Format
+
+The `manifest.json` contains:
+```json
+{{
+  "train": [{{"image": "images/sample_0000.png", "text": "ground truth"}}],
+  "val": [...],
+  "test": [...]
+}}
+```
+
+Created: {metadata['created']}
+"""
+    with open(os.path.join(state["root"], "README.md"), 'w') as f:
+        f.write(readme)
+
+    # Create ZIP
+    dataset_name_clean = (dataset_name or f"handwriting_{state['sid']}").replace(" ", "_")
+    zip_path = shutil.make_archive(
+        os.path.join(tempfile.gettempdir(), dataset_name_clean),
+        "zip",
+        state["root"]
+    )
+
+    success_msg = f"""
+### ✅ Dataset Ready!
+
+**{metadata['dataset_name']}**
+- {metadata['total_samples']} total samples
+- Split: {metadata['train_samples']} train / {metadata['val_samples']} val / {metadata['test_samples']} test
+
+Download the ZIP file below. It contains:
+- `images/` - All handwriting samples
+- `manifest.json` - Training manifest
+- `metadata.json` - Dataset info
+- `README.md` - Usage instructions
+
+Extract the ZIP and use the directory path for training:
+```bash
+python ml/models/train_trl.py \\
+  --dataset_type manifest \\
+  --manifest_data_dir /path/to/extracted/dataset
+```
+"""
+
+    return (
+        state,
+        gr.update(visible=True, value=zip_path),
+        success_msg,
+    )
+
+def restart_session():
+    """Start a new session."""
+    state = _new_session()
+    return (
+        state,
+        None,  # Clear canvas
+        "",    # Clear text
+        "🔄 New session started. Ready to collect samples!",
+        _get_gallery(state),
+        _get_stats(state),
+        gr.update(visible=False)
+    )
+
+
+# Build the Gradio interface
+with gr.Blocks(title="DisgraPhi Handwriting Collector", theme=THEME) as demo:
+    gr.Markdown("""
+    # 📝 DisgraPhi Handwriting Collector
+
+    Collect handwriting samples for personalized OCR training.
+
+    **Two modes:**
+    1. **Draw**: Write directly with mouse/stylus
+    2. **Photo**: Upload pictures of handwritten text
+
+    **Steps:**
+    1. Choose input mode (Draw or Photo)
+    2. Create/upload your handwriting sample
+    3. Enter the exact text you wrote
+    4. Click "Save Sample"
+    5. Repeat 50-200 times for best results
+    6. Click "Finalize Dataset" when done
+    """)
+
+    state = gr.State(_new_session())
 
     with gr.Row():
-        btn_next = gr.Button("Save and next", variant="primary")
-        btn_restart = gr.Button("Restart")
+        with gr.Column(scale=2):
+            # Input mode selector
+            input_mode = gr.Radio(
+                choices=["draw", "photo"],
+                value="draw",
+                label="Input Mode",
+                info="Choose how you want to input handwriting"
+            )
 
-    zip_file = gr.File(label="Download dataset (.zip)", visible=False)
+            # Dynamic input (changes based on mode)
+            with gr.Group():
+                # Drawing canvas
+                canvas = gr.Sketchpad(
+                    label="Draw your handwriting here",
+                    type="numpy",
+                    brush=gr.Brush(colors=["#000000"], default_size=3),
+                    height=300,
+                    visible=True
+                )
 
-    with gr.Accordion("Captured sentences", open=False):
-        gallery = gr.Gallery(label="Sentence crops", show_label=False, columns=5, rows=1, height="auto")
-        history = gr.Dataframe(
-            headers=["#", "Sentence", "Captured (UTC)"],
-            datatype=["number", "str", "str"],
-            interactive=False,
-            wrap=True,
-            col_count=(3, "fixed"),
+                # Photo upload
+                photo = gr.Image(
+                    label="Upload a photo of handwriting",
+                    type="pil",
+                    sources=["upload", "webcam", "clipboard"],
+                    height=300,
+                    visible=False
+                )
+
+            # Text input
+            text_input = gr.Textbox(
+                label="Text Label",
+                placeholder="Enter the exact text you wrote...",
+                lines=2,
+                info="Type exactly what you wrote in the image"
+            )
+
+            # Action buttons
+            with gr.Row():
+                save_btn = gr.Button("💾 Save Sample", variant="primary", scale=2)
+                delete_btn = gr.Button("🗑️ Delete Last", scale=1)
+
+        with gr.Column(scale=1):
+            # Suggested sentences
+            gr.Markdown("### 📋 Suggested Sentences")
+            suggested_dropdown = gr.Dropdown(
+                choices=DEFAULT_SENTENCES,
+                label="Quick Select",
+                info="Click to use a suggested sentence"
+            )
+            use_suggested_btn = gr.Button("Use Selected Text", size="sm")
+
+            with gr.Accordion("Add Custom Sentence", open=False):
+                custom_sentence = gr.Textbox(
+                    label="Custom Sentence",
+                    placeholder="Type a custom sentence..."
+                )
+                add_custom_btn = gr.Button("Add to Suggestions", size="sm")
+                custom_status = gr.Markdown("")
+
+            # Statistics
+            stats = gr.Markdown(_get_stats(state.value))
+
+            # Status
+            status = gr.Markdown("🔄 Ready to collect samples")
+
+    # Gallery of collected samples
+    with gr.Accordion("📸 Collected Samples", open=True):
+        gallery = gr.Gallery(
+            label="Your Handwriting Samples",
+            columns=5,
+            rows=2,
+            height="auto",
+            object_fit="contain"
         )
 
-    btn_restart.click(start, outputs=[state, annotator, instruction, progress, zip_file, status, history, gallery])
-    btn_next.click(
-        save_and_next,
-        inputs=[annotator, state],
-        outputs=[state, annotator, instruction, progress, zip_file, status, history, gallery],
-    )
-    demo.load(start, outputs=[state, annotator, instruction, progress, zip_file, status, history, gallery])
+    # Finalization section
+    with gr.Accordion("📦 Finalize Dataset", open=False):
+        gr.Markdown("""
+        ### Create Training Dataset
 
-demo.launch()
+        When you've collected enough samples (50-200 recommended), create your training dataset.
+        This will generate a `manifest.json` file compatible with DisgraPhi training.
+        """)
+
+        dataset_name = gr.Textbox(
+            label="Dataset Name",
+            placeholder="my_handwriting",
+            value=f"handwriting_{dt.datetime.now().strftime('%Y%m%d')}"
+        )
+
+        with gr.Row():
+            split_train = gr.Slider(
+                minimum=50,
+                maximum=90,
+                value=80,
+                step=5,
+                label="Train Split (%)",
+                info="Percentage for training"
+            )
+            split_val = gr.Slider(
+                minimum=5,
+                maximum=25,
+                value=10,
+                step=5,
+                label="Val Split (%)",
+                info="Percentage for validation"
+            )
+
+        finalize_btn = gr.Button("📦 Create Dataset Package", variant="primary")
+        finalize_status = gr.Markdown("")
+        download_file = gr.File(label="Download Dataset (.zip)", visible=False)
+
+    # Restart button
+    with gr.Row():
+        restart_btn = gr.Button("🔄 Start New Collection", variant="secondary")
+
+    # Event handlers
+    def update_input_visibility(mode):
+        """Toggle between canvas and photo upload."""
+        return (
+            gr.update(visible=(mode == "draw")),
+            gr.update(visible=(mode == "photo"))
+        )
+
+    input_mode.change(
+        update_input_visibility,
+        inputs=[input_mode],
+        outputs=[canvas, photo]
+    )
+
+    def save_with_mode(canvas_img, photo_img, text, mode, state):
+        """Save sample based on selected mode."""
+        img = canvas_img if mode == "draw" else photo_img
+        return save_sample(img, text, mode, state)
+
+    save_btn.click(
+        save_with_mode,
+        inputs=[canvas, photo, text_input, input_mode, state],
+        outputs=[state, canvas, text_input, status, gallery, stats]
+    )
+
+    delete_btn.click(
+        delete_last,
+        inputs=[state],
+        outputs=[state, status, gallery, stats]
+    )
+
+    use_suggested_btn.click(
+        use_suggested_text,
+        inputs=[suggested_dropdown, state],
+        outputs=[text_input]
+    )
+
+    add_custom_btn.click(
+        add_custom_sentence,
+        inputs=[custom_sentence, suggested_dropdown],
+        outputs=[suggested_dropdown, custom_status]
+    )
+
+    finalize_btn.click(
+        finalize_dataset,
+        inputs=[state, dataset_name, split_train, split_val],
+        outputs=[state, download_file, finalize_status]
+    )
+
+    restart_btn.click(
+        restart_session,
+        outputs=[state, canvas, text_input, status, gallery, stats, download_file]
+    )
+
+if __name__ == "__main__":
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=7860,
+        share=False
+    )
