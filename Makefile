@@ -90,3 +90,69 @@ help: ## Show this help message
 	@echo "Ultiplate Template - Make Commands"
 	@echo "================================="
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
+
+# ML Training Commands
+
+train-quick-test: ## Quick training test (10% data, 1 epoch)
+	python ml/models/train_trl.py \
+		--model_provider deepseek-ocr \
+		--dataset_type iam \
+		--sample_ratio 0.1 \
+		--num_train_epochs 1 \
+		--per_device_train_batch_size 2
+
+train-bootstrap: ## Full bootstrap training (DeepSeek-OCR on IAM)
+	python ml/models/train_trl.py \
+		--model_provider deepseek-ocr \
+		--dataset_type iam \
+		--num_train_epochs 3 \
+		--per_device_train_batch_size 2 \
+		--load_in_4bit
+
+train-bootstrap-smol: ## Bootstrap training with SmolVLM-256M (fastest)
+	python ml/models/train_trl.py \
+		--model_provider smolvlm-256m \
+		--dataset_type iam \
+		--num_train_epochs 3 \
+		--per_device_train_batch_size 4
+
+train-personalize: ## Personalization training (requires MANIFEST_DIR and BOOTSTRAP_ADAPTER)
+	@if [ -z "$(MANIFEST_DIR)" ] || [ -z "$(BOOTSTRAP_ADAPTER)" ]; then \
+		echo "Error: Set MANIFEST_DIR and BOOTSTRAP_ADAPTER"; \
+		echo "Usage: make train-personalize MANIFEST_DIR=./my_data BOOTSTRAP_ADAPTER=./checkpoints/adapter"; \
+		exit 1; \
+	fi
+	python ml/models/train_trl.py \
+		--model_provider deepseek-ocr \
+		--dataset_type manifest \
+		--manifest_data_dir $(MANIFEST_DIR) \
+		--bootstrap_adapter_path $(BOOTSTRAP_ADAPTER) \
+		--num_train_epochs 2 \
+		--learning_rate 3e-4 \
+		--augment \
+		--augment_strength 0.7
+
+benchmark: ## Benchmark models (requires MODELS)
+	@if [ -z "$(MODELS)" ]; then \
+		echo "Error: Set MODELS"; \
+		echo "Usage: make benchmark MODELS='deepseek-ocr smolvlm-256m'"; \
+		exit 1; \
+	fi
+	python ml/benchmark.py \
+		--models $(MODELS) \
+		--quantization 4bit \
+		--output ml/LEADERBOARD.md
+
+compare-experiments: ## Compare training experiments
+	python ml/compare_experiments.py \
+		--logs_dir ml/checkpoints/logs \
+		--output ml/EXPERIMENT_COMPARISON.md \
+		--json ml/experiments.json
+
+test-augmentation: ## Test augmentation presets
+	python ml/data/augmentation.py
+
+config-test: ## Test config system
+	python ml/config.py
+
+.PHONY: train-quick-test train-bootstrap train-bootstrap-smol train-personalize benchmark compare-experiments test-augmentation config-test

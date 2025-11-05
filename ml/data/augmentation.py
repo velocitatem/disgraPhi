@@ -38,6 +38,9 @@ class HandwritingAugmentation:
 
         # Apply augmentations with probability
         if random.random() < self.prob:
+            img_np = self.deskew_rotation(img_np)
+
+        if random.random() < self.prob:
             img_np = self.elastic_distortion(img_np)
 
         if random.random() < self.prob:
@@ -53,6 +56,9 @@ class HandwritingAugmentation:
         image = Image.fromarray(img_np)
 
         if random.random() < self.prob:
+            image = self.gaussian_blur(image)
+
+        if random.random() < self.prob:
             image = self.stroke_width_variation(image)
 
         if random.random() < self.prob:
@@ -61,7 +67,69 @@ class HandwritingAugmentation:
         if random.random() < self.prob:
             image = self.paper_ink_noise(image)
 
+        if random.random() < self.prob:
+            image = self.jpeg_compression(image)
+
         return image
+
+    def deskew_rotation(self, img: np.ndarray) -> np.ndarray:
+        """
+        Apply ±2° rotation to simulate slight page rotation.
+
+        Recommended by DeepSeek-OCR research for handwriting.
+        """
+        h, w = img.shape[:2]
+
+        # Random rotation angle (±2 degrees)
+        max_angle = 2.0 * self.strength
+        angle = random.uniform(-max_angle, max_angle)
+
+        # Rotation matrix
+        center = (w // 2, h // 2)
+        M = cv2.getRotationMatrix2D(center, angle, 1.0)
+
+        # Apply rotation
+        rotated = cv2.warpAffine(
+            img,
+            M,
+            (w, h),
+            borderMode=cv2.BORDER_REFLECT
+        )
+
+        return rotated
+
+    def gaussian_blur(self, img: Image.Image) -> Image.Image:
+        """
+        Apply mild Gaussian blur (sigma=0.5-1.0).
+
+        Simulates slight out-of-focus or camera blur.
+        Recommended by DeepSeek-OCR research.
+        """
+        sigma = 0.5 + 0.5 * self.strength  # Range: 0.5 - 1.0
+        blurred = img.filter(ImageFilter.GaussianBlur(radius=sigma))
+        return blurred
+
+    def jpeg_compression(self, img: Image.Image) -> Image.Image:
+        """
+        Apply JPEG compression artifacts (quality=80-95).
+
+        Simulates phone camera or scanner compression.
+        Recommended by DeepSeek-OCR research.
+        """
+        import io
+
+        # Random quality (80-95)
+        min_quality = 80
+        max_quality = 95
+        quality = int(max_quality - (max_quality - min_quality) * self.strength * random.random())
+
+        # Compress to JPEG and decompress
+        buffer = io.BytesIO()
+        img.save(buffer, format='JPEG', quality=quality)
+        buffer.seek(0)
+        compressed = Image.open(buffer)
+
+        return compressed
 
     def elastic_distortion(self, img: np.ndarray) -> np.ndarray:
         """
@@ -319,3 +387,90 @@ class MinimalAugmentation:
                 image = result
 
         return image
+
+
+# Augmentation presets for different scenarios
+AUGMENTATION_PRESETS = {
+    'conservative': {
+        'strength': 0.5,
+        'prob': 0.4,
+        'description': 'Light augmentation for clean handwriting or larger datasets (>100 samples)'
+    },
+    'standard': {
+        'strength': 0.7,
+        'prob': 0.5,
+        'description': 'Balanced augmentation (recommended default for 50-100 samples)'
+    },
+    'aggressive': {
+        'strength': 0.9,
+        'prob': 0.6,
+        'description': 'Heavy augmentation for very small datasets (<50 samples)'
+    },
+    'minimal': {
+        'strength': 0.3,
+        'prob': 0.3,
+        'description': 'Minimal augmentation for validation or testing'
+    }
+}
+
+
+def get_augmentation(preset: str = 'standard') -> HandwritingAugmentation:
+    """
+    Get augmentation pipeline by preset name.
+
+    Args:
+        preset: One of 'conservative', 'standard', 'aggressive', 'minimal'
+
+    Returns:
+        HandwritingAugmentation instance
+
+    Example:
+        >>> aug = get_augmentation('standard')
+        >>> augmented_image = aug(image)
+    """
+    if preset not in AUGMENTATION_PRESETS:
+        raise ValueError(
+            f"Unknown preset '{preset}'. "
+            f"Available: {list(AUGMENTATION_PRESETS.keys())}"
+        )
+
+    config = AUGMENTATION_PRESETS[preset]
+
+    if preset == 'minimal':
+        return MinimalAugmentation(strength=config['strength'])
+    else:
+        return HandwritingAugmentation(
+            strength=config['strength'],
+            prob=config['prob']
+        )
+
+
+def print_augmentation_presets():
+    """Print available augmentation presets."""
+    print("Available Augmentation Presets:")
+    print("=" * 80)
+    for name, config in AUGMENTATION_PRESETS.items():
+        print(f"\n{name.upper()}")
+        print(f"  Strength: {config['strength']}")
+        print(f"  Probability: {config['prob']}")
+        print(f"  Description: {config['description']}")
+    print("=" * 80)
+
+
+if __name__ == "__main__":
+    # Demo augmentation presets
+    print_augmentation_presets()
+
+    # Test augmentation
+    print("\nTesting augmentation...")
+    from PIL import Image
+    import numpy as np
+
+    # Create dummy image
+    img = Image.new('RGB', (200, 50), color='white')
+
+    # Test each preset
+    for preset_name in AUGMENTATION_PRESETS.keys():
+        aug = get_augmentation(preset_name)
+        augmented = aug(img)
+        print(f"✓ {preset_name}: {augmented.size}")
