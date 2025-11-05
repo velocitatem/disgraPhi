@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import torch
 from transformers import TrainerCallback, BitsAndBytesConfig
-from trl import SFTConfig, SFTTrainer, DataCollatorForCompletionOnlyLM
+from trl import SFTConfig, SFTTrainer
 
 # Try to import Liger Kernel (optional but recommended)
 try:
