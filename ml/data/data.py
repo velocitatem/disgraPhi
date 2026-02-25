@@ -75,6 +75,39 @@ def generate_packet(args):
     print(f"  4. Run: python ml/data/data.py process-packet --user-id {args.user_id} --images <paths>")
 
 
+def generate_calibration(args):
+    """Generate calibration sheet with pangrams and standard text."""
+    print("=" * 60)
+    print("Calibration Sheet Generation")
+    print("=" * 60)
+
+    generator = PacketGenerator(
+        user_id=args.user_id,
+        use_aruco=args.aruco
+    )
+
+    print(f"\nGenerating calibration sheet for user: {args.user_id}")
+    ground_truth = generator.generate(args.output, task_type='calibration_entries')
+
+    gt_path = args.ground_truth or args.output.replace('.pdf', '_ground_truth.json')
+    with open(gt_path, 'w') as f:
+        json.dump(ground_truth, f, indent=2)
+
+    marker_type = "ArUco markers" if args.aruco else "QR codes"
+    print(f"\n✓ Calibration sheet generated")
+    print(f"  PDF: {args.output}")
+    print(f"  Ground truth: {gt_path}")
+    print(f"  Markers: {marker_type}")
+    print(f"  Total entries: {len(ground_truth)}")
+    print(f"\nNext steps:")
+    print(f"  1. Print {args.output}")
+    print(f"  2. Write each prompt in your natural handwriting")
+    print(f"  3. Photograph each page (ensure corner markers are visible)")
+    print(f"  4. Run: python ml/data/data.py process-packet --user-id {args.user_id} "
+          f"--images <paths> --ground-truth {gt_path}"
+          f"{' --aruco' if args.aruco else ''}")
+
+
 def process_packet(args):
     """Process photographed personalization packet."""
     print("=" * 60)
@@ -109,7 +142,13 @@ def process_packet(args):
     print(f"Output directory: {user_dir}")
 
     # Process
-    processor = PacketProcessor(user_dir=user_dir)
+    use_aruco = getattr(args, 'aruco', False)
+    no_normalize = getattr(args, 'no_normalize', False)
+    processor = PacketProcessor(
+        user_dir=user_dir,
+        use_aruco=use_aruco,
+        normalize_lighting=not no_normalize
+    )
     results = processor.process_packet(
         image_paths=image_paths,
         ground_truth=ground_truth
@@ -302,6 +341,35 @@ Examples:
     )
     parser_gen.set_defaults(func=generate_packet)
 
+    # Generate calibration sheet
+    parser_cal = subparsers.add_parser(
+        'generate-calibration',
+        help='Generate calibration sheet with pangrams and standard text'
+    )
+    parser_cal.add_argument(
+        '--user-id',
+        type=str,
+        required=True,
+        help='Unique user identifier'
+    )
+    parser_cal.add_argument(
+        '--output',
+        type=str,
+        default='calibration.pdf',
+        help='Output PDF path'
+    )
+    parser_cal.add_argument(
+        '--ground-truth',
+        type=str,
+        help='Ground truth JSON output path (auto-generated if not specified)'
+    )
+    parser_cal.add_argument(
+        '--aruco',
+        action='store_true',
+        help='Use ArUco markers instead of QR codes'
+    )
+    parser_cal.set_defaults(func=generate_calibration)
+
     # Process packet
     parser_proc = subparsers.add_parser(
         'process-packet',
@@ -330,6 +398,16 @@ Examples:
         '--output-dir',
         type=str,
         help='Output directory for processed data (default: ml/data/users/{user_id})'
+    )
+    parser_proc.add_argument(
+        '--aruco',
+        action='store_true',
+        help='Use ArUco marker detection instead of QR codes'
+    )
+    parser_proc.add_argument(
+        '--no-normalize',
+        action='store_true',
+        help='Disable Sauvola lighting normalization'
     )
     parser_proc.set_defaults(func=process_packet)
 

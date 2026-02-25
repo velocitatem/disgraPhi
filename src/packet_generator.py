@@ -3,9 +3,10 @@ Personalization packet generator for DisgraPhi.
 
 Generates PDF practice packets with:
 - Journal entries or other training content from YAML config
-- QR codes at corners for alignment
+- QR codes or ArUco markers at corners for alignment
 - Free-format writing areas (no lines)
 - Prompt text displayed for user to copy
+- Calibration sheet mode with pangrams and standard text
 """
 
 import io
@@ -35,10 +36,12 @@ class PacketGenerator:
         self,
         user_id: str,
         config_path: str = "ml/data/training.yml",
-        page_size=letter
+        page_size=letter,
+        use_aruco: bool = False
     ):
         self.user_id = user_id
         self.page_size = page_size
+        self.use_aruco = use_aruco
         self.config = self._load_config(config_path)
         self.page_manifest: List[Dict[str, Any]] = []
 
@@ -149,7 +152,10 @@ class PacketGenerator:
             self.page_manifest.append(page_meta)
 
             qr_payload = self._build_qr_payload(page_meta)
-            self._add_qr_corners(c, qr_payload)
+            if self.use_aruco:
+                self._add_aruco_corners(c)
+            else:
+                self._add_qr_corners(c, qr_payload)
 
             y_position = self._initial_y_position(page_index)
 
@@ -238,6 +244,43 @@ class PacketGenerator:
             img_buffer.seek(0)
 
             # Draw QR code
+            c.drawImage(
+                ImageReader(img_buffer),
+                x, y,
+                width=self.qr_size,
+                height=self.qr_size
+            )
+
+    def _add_aruco_corners(self, c: canvas.Canvas) -> None:
+        """Add ArUco markers at the four corners for perspective correction.
+
+        ArUco IDs: 0=TL, 1=TR, 2=BR, 3=BL (DICT_4X4_50).
+        """
+        import cv2
+        import numpy as np
+
+        corner_positions = {
+            0: (self.margin_left, self.height - self.margin_top - self.qr_size),
+            1: (self.width - self.margin_right - self.qr_size,
+                self.height - self.margin_top - self.qr_size),
+            3: (self.margin_left, self.margin_bottom),
+            2: (self.width - self.margin_right - self.qr_size, self.margin_bottom),
+        }
+
+        try:
+            aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+        except AttributeError:
+            aruco_dict = cv2.aruco.Dictionary_get(cv2.aruco.DICT_4X4_50)
+
+        for marker_id, (x, y) in corner_positions.items():
+            marker_img = cv2.aruco.generateImageMarker(aruco_dict, marker_id, 200)
+            from PIL import Image as PILImage
+            pil_img = PILImage.fromarray(marker_img)
+
+            img_buffer = io.BytesIO()
+            pil_img.save(img_buffer, format='PNG')
+            img_buffer.seek(0)
+
             c.drawImage(
                 ImageReader(img_buffer),
                 x, y,
@@ -524,7 +567,7 @@ def main():
     parser.add_argument(
         '--task-type',
         type=str,
-        choices=['journal_entries', 'story_prompts', 'letter_templates'],
+        choices=['journal_entries', 'story_prompts', 'letter_templates', 'calibration_entries'],
         help='Type of content to generate (default: from config)'
     )
     parser.add_argument(
@@ -533,13 +576,19 @@ def main():
         default='ml/data/training.yml',
         help='Path to training config YAML'
     )
+    parser.add_argument(
+        '--aruco',
+        action='store_true',
+        help='Use ArUco markers instead of QR codes for corner alignment'
+    )
 
     args = parser.parse_args()
 
     # Generate packet
     generator = PacketGenerator(
         user_id=args.user_id,
-        config_path=args.config
+        config_path=args.config,
+        use_aruco=args.aruco
     )
     ground_truth = generator.generate(args.output, task_type=args.task_type)
 

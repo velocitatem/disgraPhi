@@ -282,6 +282,90 @@ class HandwritingAugmentation:
         return result
 
 
+class WildAugmentation:
+    """
+    Augmentation pipeline simulating "in the wild" phone captures of handwriting.
+
+    Realistic degradations for photos of paper on desks:
+    - Random shadows (phone/hand casting shadows)
+    - Illumination gradients (uneven desk lighting)
+    - Perspective warping (bad photo angles)
+    - Elastic deformation (simulates erratic motor control)
+    """
+
+    def __init__(self, strength: float = 0.7, prob: float = 0.5):
+        self.strength = strength
+        self.prob = prob
+        self._base = HandwritingAugmentation(strength=strength, prob=prob)
+
+    def __call__(self, image: Image.Image) -> Image.Image:
+        img_np = np.array(image)
+
+        if random.random() < self.prob:
+            img_np = self.random_shadow(img_np)
+        if random.random() < self.prob:
+            img_np = self.illumination_gradient(img_np)
+        if random.random() < self.prob:
+            img_np = self._base.elastic_distortion(img_np)
+        if random.random() < self.prob:
+            img_np = self._base.perspective_transform(img_np)
+
+        image = Image.fromarray(img_np)
+
+        if random.random() < self.prob:
+            image = self._base.paper_ink_noise(image)
+
+        return image
+
+    def random_shadow(self, img: np.ndarray) -> np.ndarray:
+        """Simulate a shadow cast across the image (e.g., hand or phone shadow)."""
+        h, w = img.shape[:2]
+        shadow_mask = np.ones((h, w), dtype=np.float32)
+
+        # Random polygon shadow region
+        n_points = random.randint(3, 5)
+        pts = np.array([
+            [random.randint(0, w), random.randint(0, h)]
+            for _ in range(n_points)
+        ], dtype=np.int32)
+
+        darkness = 0.3 + 0.4 * (1 - self.strength)  # stronger = darker
+        cv2.fillConvexPoly(shadow_mask, pts, darkness)
+
+        # Blur the shadow edges for realism
+        ksize = int(50 * self.strength) | 1  # ensure odd
+        shadow_mask = cv2.GaussianBlur(shadow_mask, (ksize, ksize), 0)
+
+        if len(img.shape) == 3:
+            shadow_mask = shadow_mask[:, :, np.newaxis]
+
+        return np.clip(img * shadow_mask, 0, 255).astype(np.uint8)
+
+    def illumination_gradient(self, img: np.ndarray) -> np.ndarray:
+        """Simulate uneven desk lighting with a gradient overlay."""
+        h, w = img.shape[:2]
+
+        # Random gradient direction
+        angle = random.uniform(0, 2 * np.pi)
+        cx, cy = w / 2, h / 2
+
+        x = np.arange(w) - cx
+        y = np.arange(h) - cy
+        xx, yy = np.meshgrid(x, y)
+
+        gradient = (xx * np.cos(angle) + yy * np.sin(angle))
+        gradient = (gradient - gradient.min()) / (gradient.max() - gradient.min() + 1e-8)
+
+        # Scale: bright side 1.0+boost, dark side 1.0-darken
+        boost = 0.15 * self.strength
+        gradient = 1.0 - boost + gradient * 2 * boost
+
+        if len(img.shape) == 3:
+            gradient = gradient[:, :, np.newaxis]
+
+        return np.clip(img * gradient, 0, 255).astype(np.uint8)
+
+
 class MinimalAugmentation:
     """
     Minimal augmentation for validation/testing or very few samples (k < 5).

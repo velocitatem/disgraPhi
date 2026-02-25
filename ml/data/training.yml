@@ -49,6 +49,42 @@ journal_entries:
       my life and how those bonds shape my sense of purpose. Tomorrow I want to reach
       out to someone I haven't talked to in a while.
 
+# Calibration sheet entries for bootstrapping ground-truth data
+# Contains pangrams, common prefixes/suffixes, and numbers
+# Used with generate-calibration to create calibration PDFs
+calibration_entries:
+  - id: cal_001
+    prompt: "Pangram (Full Alphabet)"
+    text: "The quick brown fox jumps over the lazy dog."
+
+  - id: cal_002
+    prompt: "Pangram Variation"
+    text: "Pack my box with five dozen liquor jugs."
+
+  - id: cal_003
+    prompt: "Pangram Variation"
+    text: "How vexingly quick daft zebras jump."
+
+  - id: cal_004
+    prompt: "Numbers and Digits"
+    text: "0 1 2 3 4 5 6 7 8 9 10 25 100 2025 31415 99999"
+
+  - id: cal_005
+    prompt: "Common Prefixes and Suffixes"
+    text: "un re pre dis mis over under out ing tion ment ness ful less able ible"
+
+  - id: cal_006
+    prompt: "Mixed Sentence"
+    text: "On January 15th, 2025, the 3 researchers analyzed 487 samples and found 92% accuracy."
+
+  - id: cal_007
+    prompt: "Punctuation Practice"
+    text: "Hello! How are you? I'm fine, thanks. Yes/No: check (all) items — done."
+
+  - id: cal_008
+    prompt: "Uppercase and Lowercase"
+    text: "ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz"
+
 # Alternative content types for future expansion
 story_prompts:
   - id: story_001
