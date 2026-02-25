@@ -11,7 +11,7 @@ flask-cors
 python-logging-loki
 python-dotenv
 tensorboard
-opencv-python
+opencv-contrib-python
 pillow
 qrcode[pil]
 reportlab

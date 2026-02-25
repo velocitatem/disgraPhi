@@ -5,3 +5,4 @@
 **/.scraper_cache/
 **/downloaded_files/
 **.egg-info/
+.pytest_cache/

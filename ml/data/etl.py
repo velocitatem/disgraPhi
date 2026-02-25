@@ -265,18 +265,23 @@ class IAMDownloader:
 class PacketProcessor:
     """
     Processes user personalization packets:
-    1. Detect QR codes at corners for alignment
+    1. Detect QR codes or ArUco markers at corners for alignment
     2. Apply perspective transform to de-skew
-    3. Segment and crop individual lines
-    4. Pair with ground truth text
+    3. Normalize lighting via Sauvola adaptive thresholding
+    4. Segment and crop individual lines
+    5. Pair with ground truth text
 
     Args:
         user_dir: Directory to store user's processed data
+        use_aruco: Prefer ArUco marker detection over QR codes
+        normalize_lighting: Apply Sauvola binarization for shadow removal
     """
 
-    def __init__(self, user_dir: str):
+    def __init__(self, user_dir: str, use_aruco: bool = False, normalize_lighting: bool = True):
         self.user_dir = Path(user_dir)
         self.user_dir.mkdir(parents=True, exist_ok=True)
+        self.use_aruco = use_aruco
+        self.normalize_lighting = normalize_lighting
 
         self.lines_dir = self.user_dir / 'lines'
         self.lines_dir.mkdir(exist_ok=True)
@@ -306,8 +311,11 @@ class PacketProcessor:
                 print(f"Warning: Could not read {img_path}")
                 continue
 
-            # Detect QR codes and de-skew
-            alignment = self._detect_and_align(img)
+            # Detect QR codes / ArUco markers and de-skew
+            if self.use_aruco:
+                alignment = self._detect_aruco_and_align(img)
+            else:
+                alignment = self._detect_and_align(img)
 
             if alignment is None:
                 print(f"Warning: Could not align {img_path} (no QR codes detected)")
@@ -344,6 +352,10 @@ class PacketProcessor:
                 print(
                     f"Detected packet page {page_label} (id {page_id}) for {img_path}"
                 )
+
+            # Normalize lighting (Sauvola binarization for shadow removal)
+            if self.normalize_lighting:
+                aligned_img = self._normalize_lighting(aligned_img)
 
             # Extract textarea rectangles
             textarea_imgs = self._extract_textareas(aligned_img)
@@ -487,6 +499,90 @@ class PacketProcessor:
             return {'corner': data}
 
         return None
+
+    def _detect_aruco_and_align(self, img: np.ndarray) -> Optional[Dict[str, Any]]:
+        """
+        Detect ArUco markers at page corners and apply perspective correction.
+
+        ArUco IDs map to corners: 0=TL, 1=TR, 2=BR, 3=BL.
+        Returns dict with aligned image or None if no markers found.
+        """
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        try:
+            aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+            params = cv2.aruco.DetectorParameters()
+            detector = cv2.aruco.ArucoDetector(aruco_dict, params)
+            marker_corners, marker_ids, _ = detector.detectMarkers(gray)
+        except AttributeError:
+            # Fallback for older OpenCV versions
+            aruco_dict = cv2.aruco.Dictionary_get(cv2.aruco.DICT_4X4_50)
+            params = cv2.aruco.DetectorParameters_create()
+            marker_corners, marker_ids, _ = cv2.aruco.detectMarkers(gray, aruco_dict, parameters=params)
+
+        if marker_ids is None or len(marker_ids) == 0:
+            return None
+
+        id_to_corner = {0: 'TL', 1: 'TR', 2: 'BR', 3: 'BL'}
+        corners: Dict[str, tuple] = {}
+
+        for i, mid in enumerate(marker_ids.flatten()):
+            corner_label = id_to_corner.get(int(mid))
+            if corner_label:
+                c = marker_corners[i][0]
+                center = (int(c[:, 0].mean()), int(c[:, 1].mean()))
+                corners[corner_label] = center
+
+        aligned = None
+        if len(corners) == 4:
+            src_pts = np.float32([corners['TL'], corners['TR'], corners['BR'], corners['BL']])
+            width = max(
+                np.linalg.norm(np.array(corners['TR']) - np.array(corners['TL'])),
+                np.linalg.norm(np.array(corners['BR']) - np.array(corners['BL']))
+            )
+            height = max(
+                np.linalg.norm(np.array(corners['BL']) - np.array(corners['TL'])),
+                np.linalg.norm(np.array(corners['BR']) - np.array(corners['TR']))
+            )
+            dst_pts = np.float32([[0, 0], [width, 0], [width, height], [0, height]])
+            matrix = cv2.getPerspectiveTransform(src_pts, dst_pts)
+            aligned = cv2.warpPerspective(img, matrix, (int(width), int(height)))
+
+        return {
+            'image': aligned,
+            'page': None,
+            'votes': {},
+            'corners': list(corners.keys()),
+            'payloads': [],
+        }
+
+    def _normalize_lighting(self, img: np.ndarray) -> np.ndarray:
+        """
+        Normalize lighting using Sauvola adaptive thresholding.
+
+        Strips out shadows, uneven illumination, and varying paper colors,
+        leaving high-contrast ink strokes on a clean white background.
+        Returns a 3-channel image suitable for downstream processing.
+        """
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
+
+        # Sauvola binarization: threshold = mean * (1 + k * (std/R - 1))
+        # where R = max(std) = 128 for uint8
+        window_size = 25
+        k = 0.2
+        R = 128.0
+
+        mean = cv2.blur(gray.astype(np.float64), (window_size, window_size))
+        mean_sq = cv2.blur((gray.astype(np.float64)) ** 2, (window_size, window_size))
+        std = np.sqrt(np.maximum(mean_sq - mean ** 2, 0))
+
+        threshold = mean * (1.0 + k * (std / R - 1.0))
+        binary = np.where(gray > threshold, 255, 0).astype(np.uint8)
+
+        # Return as 3-channel for consistency with downstream pipeline
+        if len(img.shape) == 3:
+            return cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+        return binary
 
     def _extract_textareas(self, img: np.ndarray) -> List[np.ndarray]:
         """
